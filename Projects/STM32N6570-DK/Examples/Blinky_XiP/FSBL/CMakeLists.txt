@@ -79,10 +79,44 @@ if((CMAKE_C_STANDARD EQUAL 90) OR (CMAKE_C_STANDARD EQUAL 99))
     message(ERROR "Generated code requires C11 or higher")
 endif()
 
+# Specify the output ELF file
+set(TARGET_ELF "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.elf")
 
+# Command to generate .bin file
+add_custom_command(
+ TARGET ${CMAKE_PROJECT_NAME}
+ POST_BUILD
+ COMMAND ${CMAKE_OBJCOPY}
+-O binary ${TARGET_ELF} ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+ COMMENT "Generating .bin file"
+)
 
+# Define the paths to the STM32 Signing Tool and the input/output files
+set(SIGNING_TOOL "C:/Program Files/ST/STM32CubeProgrammer_2.20.0/bin/STM32_SigningTool_CLI.exe")
 
+# Define the input and output files for FSBL
+set(FSBL_INPUT "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin")
+set(FSBL_OUTPUT "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}-trusted.bin")
 
+# Add a post-build step to sign the FSBL binary
+add_custom_command(
+ TARGET ${CMAKE_PROJECT_NAME}
+ POST_BUILD
+ COMMAND ${CMAKE_COMMAND} -E echo y > input.txt
+ # from STM32CubeProgrammer version 2.21.0 a new parameter is needed "-align" Change the command below to use the new parameter if you are using a version >= 2.21.0
+ # COMMAND "${SIGNING_TOOL}" -bin "${FSBL_INPUT}" -nk -of 0x80000000 -t fsbl -o "${FSBL_OUTPUT}" -hv 2.3 -align -dump "${FSBL_OUTPUT}" < input.txt
+ COMMAND "${SIGNING_TOOL}" -bin "${FSBL_INPUT}" -nk -of 0x80000000 -t fsbl -o "${FSBL_OUTPUT}" -hv 2.3 -dump "${FSBL_OUTPUT}" < input.txt
+ WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+ COMMENT "Signing FSBL binary: ${FSBL_INPUT} -> ${FSBL_OUTPUT}"
+)
+
+# Convert the signed FSBL .bin back to .elf
+add_custom_command(
+ TARGET ${CMAKE_PROJECT_NAME}
+ POST_BUILD
+ COMMAND ${CMAKE_OBJCOPY} -I binary -O elf32-littlearm -B arm --change-addresses=0x70000000 ${FSBL_OUTPUT} ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}-trusted.elf
+ COMMENT "Converting signed FSBL .bin back to .elf in address [0x70000000]"
+)
 
 
 
