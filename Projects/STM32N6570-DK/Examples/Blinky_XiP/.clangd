@@ -1,0 +1,11 @@
+CompileFlags:
+  CompilationDatabase: Appli/build
+If:
+  PathMatch: Appli/.*
+
+---
+
+CompileFlags:
+  CompilationDatabase: FSBL/build
+If:
+  PathMatch: FSBL/.*
