@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,12 +42,14 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-/* USER CODE BEGIN PV */
+UART_HandleTypeDef hlpuart1;
 
+/* USER CODE BEGIN PV */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
+static void MX_LPUART1_UART_Init(void);
 static void SystemIsolation_Config(void);
 /* USER CODE BEGIN PFP */
 
@@ -54,7 +57,13 @@ static void SystemIsolation_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+static void mem_print(const char *label, uint32_t addr)
+{
+  char buf[64];
+  volatile uint32_t val = *(volatile uint32_t *)addr;
+  int len = snprintf(buf, sizeof(buf), "%s [0x%08lX] = 0x%08lX\r\n", label, addr, val);
+  HAL_UART_Transmit(&hlpuart1, (uint8_t *)buf, (uint16_t)len, 100);
+}
 /* USER CODE END 0 */
 
 /**
@@ -81,9 +90,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_LPUART1_UART_Init();
   SystemIsolation_Config();
   /* USER CODE BEGIN 2 */
+  /* --- AXISRAM: first word of each section --- */
+  mem_print("AXISRAM1", 0x34000000UL);
+  mem_print("AXISRAM2", 0x34100000UL);
+  mem_print("AXISRAM3", 0x34200000UL);
+  mem_print("AXISRAM4", 0x34270000UL);
+  mem_print("AXISRAM5", 0x342E0000UL);
+  mem_print("AXISRAM6", 0x34350000UL);
 
+  /* --- XSPI2 Flash: FSBL header, FSBL vector table, Appli header, Appli vector table --- */
+  mem_print("FSBL hdr [0]",  0x70000000UL);
+  mem_print("FSBL code[0]",  0x70000400UL);
+  mem_print("Appli hdr [0]", 0x70100000UL);
+  mem_print("Appli code[0]", 0x70100400UL);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -93,9 +115,58 @@ int main(void)
     HAL_GPIO_TogglePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin);
     HAL_Delay(200);
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
+}
+
+/**
+  * @brief LPUART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_LPUART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN LPUART1_Init 0 */
+
+  /* USER CODE END LPUART1_Init 0 */
+
+  /* USER CODE BEGIN LPUART1_Init 1 */
+
+  /* USER CODE END LPUART1_Init 1 */
+  hlpuart1.Instance = LPUART1;
+  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.StopBits = UART_STOPBITS_1;
+  hlpuart1.Init.Parity = UART_PARITY_EVEN;
+  hlpuart1.Init.Mode = UART_MODE_TX_RX;
+  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  hlpuart1.FifoMode = UART_FIFOMODE_DISABLE;
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN LPUART1_Init 2 */
+
+  /* USER CODE END LPUART1_Init 2 */
+
 }
 
 /**
@@ -116,6 +187,8 @@ int main(void)
   /* RIF-Aware IPs Config */
 
   /* set up GPIO configuration */
+  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_5,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_6,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
   HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_1,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
 
   /* USER CODE BEGIN RIF_Init 1 */
@@ -140,6 +213,7 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOO_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
