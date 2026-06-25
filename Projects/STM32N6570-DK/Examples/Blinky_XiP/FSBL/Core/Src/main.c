@@ -242,7 +242,7 @@ static void MX_XSPI2_Init(void)
   {
     Error_Handler();
   }
-  sXspiManagerCfg.nCSOverride = HAL_XSPI_CSSEL_OVR_DISABLED;
+  sXspiManagerCfg.nCSOverride = HAL_XSPI_CSSEL_OVR_NCS1;
   sXspiManagerCfg.IOPort = HAL_XSPIM_IOPORT_2;
   sXspiManagerCfg.Req2AckTime = 1;
   if (HAL_XSPIM_Config(&hxspi2, &sXspiManagerCfg, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
@@ -268,6 +268,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPION_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
