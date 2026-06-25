@@ -53,7 +53,7 @@
 
 /* USER CODE END INCLUDE */
 /* Private variables ---------------------------------------------------------*/
-extern XSPI_HandleTypeDef hxspi2;
+extern XSPI_HandleTypeDef hxspi1;
 
 /* USER CODE BEGIN PV */
 

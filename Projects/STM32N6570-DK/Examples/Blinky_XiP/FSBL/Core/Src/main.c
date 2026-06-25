@@ -42,6 +42,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+XSPI_HandleTypeDef hxspi1;
 XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
@@ -52,6 +53,8 @@ XSPI_HandleTypeDef hxspi2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_XSPI2_Init(void);
+static void MX_XSPI1_Init(void);
+static void SystemIsolation_Config(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -89,9 +92,61 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_XSPI2_Init();
+  MX_XSPI1_Init();
+  SystemIsolation_Config();
   MX_EXTMEM_MANAGER_Init();
   /* USER CODE BEGIN 2 */
+  /* -----------------------------------------------------------------------
+   * XSPI1 / APS256XX PSRAM — memory-mapped read/write setup
+   * Must complete before BOOT_Application() so the Appli finds PSRAM ready.
+   * ----------------------------------------------------------------------- */
+  {
+    XSPI_RegularCmdTypeDef   sCommand      = {0};
+    XSPI_MemoryMappedTypeDef sMemMappedCfg = {0};
 
+    /* Bypass the prescaler set during MX_XSPI1_Init (prescaler=1 → /2).
+     * Setting it to 0 runs XSPI1 at the full input clock frequency. */
+    if (HAL_XSPI_SetClockPrescaler(&hxspi1, 0) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Write command: APS256XX synchronous write (OPI, 8-line cmd STR,
+     * 32-bit address DTR, 16-line data DTR, DQS enabled). */
+    sCommand.OperationType      = HAL_XSPI_OPTYPE_WRITE_CFG;
+    sCommand.InstructionMode    = HAL_XSPI_INSTRUCTION_8_LINES;
+    sCommand.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
+    sCommand.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
+    sCommand.Instruction        = 0x80U; /* Synchronous Write */
+    sCommand.AddressMode        = HAL_XSPI_ADDRESS_8_LINES;
+    sCommand.AddressWidth       = HAL_XSPI_ADDRESS_32_BITS;
+    sCommand.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_ENABLE;
+    sCommand.DataMode           = HAL_XSPI_DATA_16_LINES;
+    sCommand.DataDTRMode        = HAL_XSPI_DATA_DTR_ENABLE;
+    sCommand.DummyCycles        = 6U;
+    sCommand.DQSMode            = HAL_XSPI_DQS_ENABLE;
+    if (HAL_XSPI_Command(&hxspi1, &sCommand, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Read command: APS256XX synchronous read (same protocol, 6 dummy cycles). */
+    sCommand.OperationType = HAL_XSPI_OPTYPE_READ_CFG;
+    sCommand.Instruction   = 0x00U; /* Synchronous Read */
+    sCommand.DummyCycles   = 6U;
+    if (HAL_XSPI_Command(&hxspi1, &sCommand, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Enable memory-mapped mode — PSRAM appears as plain R/W RAM at 0x90000000. */
+    sMemMappedCfg.TimeOutActivation  = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
+    sMemMappedCfg.TimeoutPeriodClock = 0x34U;
+    if (HAL_XSPI_MemoryMapped(&hxspi1, &sMemMappedCfg) != HAL_OK)
+    {
+      Error_Handler();
+    }
+  }
   /* USER CODE END 2 */
 
   /* Launch the application */
@@ -205,6 +260,119 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief RIF Initialization Function
+  * @param None
+  * @retval None
+  */
+  static void SystemIsolation_Config(void)
+{
+
+  /* USER CODE BEGIN RIF_Init 0 */
+
+  /* USER CODE END RIF_Init 0 */
+
+  /* set all required IPs as secure privileged */
+  __HAL_RCC_RIFSC_CLK_ENABLE();
+
+  /* RIF-Aware IPs Config */
+
+  /* set up GPIO configuration */
+  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_5,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_6,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_0,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_1,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_2,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_3,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_4,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_5,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_6,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_8,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_9,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_10,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPION,GPIO_PIN_11,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_0,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_1,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_2,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_3,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_4,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_0,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_1,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_2,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_3,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_4,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_5,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_6,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_7,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_8,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_9,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_10,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_11,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_12,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_13,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_14,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOP,GPIO_PIN_15,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
+
+  /* USER CODE BEGIN RIF_Init 1 */
+
+  /* USER CODE END RIF_Init 1 */
+  /* USER CODE BEGIN RIF_Init 2 */
+
+  /* USER CODE END RIF_Init 2 */
+
+}
+
+/**
+  * @brief XSPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_XSPI1_Init(void)
+{
+
+  /* USER CODE BEGIN XSPI1_Init 0 */
+
+  /* USER CODE END XSPI1_Init 0 */
+
+  XSPIM_CfgTypeDef sXspiManagerCfg = {0};
+
+  /* USER CODE BEGIN XSPI1_Init 1 */
+
+  /* USER CODE END XSPI1_Init 1 */
+  /* XSPI1 parameter configuration*/
+  hxspi1.Instance = XSPI1;
+  hxspi1.Init.FifoThresholdByte = 4;
+  hxspi1.Init.MemoryMode = HAL_XSPI_SINGLE_MEM;
+  hxspi1.Init.MemoryType = HAL_XSPI_MEMTYPE_APMEM_16BITS;
+  hxspi1.Init.MemorySize = HAL_XSPI_SIZE_256MB;
+  hxspi1.Init.ChipSelectHighTimeCycle = 5;
+  hxspi1.Init.FreeRunningClock = HAL_XSPI_FREERUNCLK_DISABLE;
+  hxspi1.Init.ClockMode = HAL_XSPI_CLOCK_MODE_0;
+  hxspi1.Init.WrapSize = HAL_XSPI_WRAP_NOT_SUPPORTED;
+  hxspi1.Init.ClockPrescaler = 1;
+  hxspi1.Init.SampleShifting = HAL_XSPI_SAMPLE_SHIFT_NONE;
+  hxspi1.Init.DelayHoldQuarterCycle = HAL_XSPI_DHQC_DISABLE;
+  hxspi1.Init.ChipSelectBoundary = HAL_XSPI_BONDARYOF_16KB;
+  hxspi1.Init.MaxTran = 0;
+  hxspi1.Init.Refresh = 0;
+  hxspi1.Init.MemorySelect = HAL_XSPI_CSSEL_NCS1;
+  if (HAL_XSPI_Init(&hxspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sXspiManagerCfg.nCSOverride = HAL_XSPI_CSSEL_OVR_NCS1;
+  sXspiManagerCfg.IOPort = HAL_XSPIM_IOPORT_1;
+  sXspiManagerCfg.Req2AckTime = 1;
+  if (HAL_XSPIM_Config(&hxspi1, &sXspiManagerCfg, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN XSPI1_Init 2 */
+
+  /* USER CODE END XSPI1_Init 2 */
+
+}
+
+/**
   * @brief XSPI2 Initialization Function
   * @param None
   * @retval None
@@ -267,6 +435,8 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOP_CLK_ENABLE();
+  __HAL_RCC_GPIOO_CLK_ENABLE();
   __HAL_RCC_GPION_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 

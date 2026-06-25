@@ -18,13 +18,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32n657xx.h"
-#include "stm32n6xx_hal_rcc.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include "venc_buffers.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,7 +51,6 @@ UART_HandleTypeDef hlpuart1;
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
 static void MX_LPUART1_UART_Init(void);
-static void SystemIsolation_Config(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -93,7 +91,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_LPUART1_UART_Init();
-  SystemIsolation_Config();
   /* USER CODE BEGIN 2 */
   
   // a) Power the RAM up by writing 0 to SRAMSD in RAMCFG_AXISRAMxCR
@@ -130,6 +127,53 @@ int main(void)
   mem_print("FSBL code[0]",  0x70000400UL);
   mem_print("Appli hdr [0]", 0x70100000UL);
   mem_print("Appli code[0]", 0x70100400UL);
+
+  /* --- PSRAM Ping-Pong Buffer Performance Test (XSPI1 @ 0x90000000) --- */
+  {
+    /* Enable DWT cycle counter for timing measurements */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+
+    typedef struct { const char *name; uint8_t *buf; uint32_t size; } BufDesc;
+    const BufDesc bufs[] = {
+      { "frame_ping", frame_ping, VENC_FRAME_BUF_SIZE     },
+      { "frame_pong", frame_pong, VENC_FRAME_BUF_SIZE     },
+      { "bs_ping",    bs_ping,    VENC_BITSTREAM_BUF_SIZE },
+      { "bs_pong",    bs_pong,    VENC_BITSTREAM_BUF_SIZE },
+    };
+
+    char ubuf[96];
+    uint32_t clk = SystemCoreClock;
+
+    for (unsigned i = 0; i < 4U; i++)
+    {
+      uint8_t  *p  = bufs[i].buf;
+      uint32_t  sz = bufs[i].size;
+
+      /* Sequential write: fill with incrementing byte pattern */
+      DWT->CYCCNT = 0;
+      for (uint32_t j = 0; j < sz; j++) p[j] = (uint8_t)j;
+      uint32_t wcycles = DWT->CYCCNT;
+
+      /* Sequential read + verify */
+      uint32_t errors = 0;
+      DWT->CYCCNT = 0;
+      for (uint32_t j = 0; j < sz; j++) if (p[j] != (uint8_t)j) errors++;
+      uint32_t rcycles = DWT->CYCCNT;
+
+      uint32_t wmbs = (wcycles > 0U) ?
+          (uint32_t)((uint64_t)sz * clk / wcycles / (1024UL * 1024UL)) : 0U;
+      uint32_t rmbs = (rcycles > 0U) ?
+          (uint32_t)((uint64_t)sz * clk / rcycles / (1024UL * 1024UL)) : 0U;
+
+      int len = snprintf(ubuf, sizeof(ubuf),
+          "[PSRAM] %-10s wr:%4u MB/s  rd:%4u MB/s  %s\r\n",
+          bufs[i].name, (unsigned)wmbs, (unsigned)rmbs,
+          errors == 0U ? "OK" : "FAIL");
+      HAL_UART_Transmit(&hlpuart1, (uint8_t *)ubuf, (uint16_t)len, 500);
+    }
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -190,37 +234,6 @@ static void MX_LPUART1_UART_Init(void)
   /* USER CODE BEGIN LPUART1_Init 2 */
 
   /* USER CODE END LPUART1_Init 2 */
-
-}
-
-/**
-  * @brief RIF Initialization Function
-  * @param None
-  * @retval None
-  */
-  static void SystemIsolation_Config(void)
-{
-
-  /* USER CODE BEGIN RIF_Init 0 */
-
-  /* USER CODE END RIF_Init 0 */
-
-  /* set all required IPs as secure privileged */
-  __HAL_RCC_RIFSC_CLK_ENABLE();
-
-  /* RIF-Aware IPs Config */
-
-  /* set up GPIO configuration */
-  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_5,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
-  HAL_GPIO_ConfigPinAttributes(GPIOE,GPIO_PIN_6,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
-  HAL_GPIO_ConfigPinAttributes(GPIOO,GPIO_PIN_1,GPIO_PIN_SEC|GPIO_PIN_NPRIV);
-
-  /* USER CODE BEGIN RIF_Init 1 */
-
-  /* USER CODE END RIF_Init 1 */
-  /* USER CODE BEGIN RIF_Init 2 */
-
-  /* USER CODE END RIF_Init 2 */
 
 }
 

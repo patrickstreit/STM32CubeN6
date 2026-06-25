@@ -42,6 +42,7 @@ MEMORY
 {
   ROM    (xrw)    : ORIGIN = 0x70100400,   LENGTH = 511K
   RAM    (xrw)    : ORIGIN = 0x34000000,   LENGTH = 2048K
+  PSRAM  (rw)     : ORIGIN = 0x90000000,   LENGTH = 64M
 }
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
@@ -248,4 +249,16 @@ SECTIONS
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
+
+  /* Ping-pong buffers for VENC pipeline — placed in PSRAM (XSPI1, 0x90000000)
+   * frame_ping/frame_pong : 4 MB each (DCMIPP->VENC, RGB565, up to 1920x1088)
+   * bs_ping/bs_pong       : ~1 MB each (VENC->SD, H.264 bitstream)
+   * NOLOAD: PSRAM is volatile; no flash initialiser is generated. */
+  .psram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.psram)
+    *(.psram*)
+    . = ALIGN(4);
+  } >PSRAM
 }
