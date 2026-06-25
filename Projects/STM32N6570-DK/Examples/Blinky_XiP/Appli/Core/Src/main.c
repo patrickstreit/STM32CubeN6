@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32n657xx.h"
+#include "stm32n6xx_hal_rcc.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -61,7 +63,7 @@ static void mem_print(const char *label, uint32_t addr)
 {
   char buf[64];
   volatile uint32_t val = *(volatile uint32_t *)addr;
-  int len = snprintf(buf, sizeof(buf), "%s [0x%08lX] = 0x%08lX\r\n", label, addr, val);
+  int len = snprintf(buf, sizeof(buf), "%s [0x%08X] = 0x%08X\r\n", label, (unsigned)addr, (unsigned)val);
   HAL_UART_Transmit(&hlpuart1, (uint8_t *)buf, (uint16_t)len, 100);
 }
 /* USER CODE END 0 */
@@ -93,6 +95,28 @@ int main(void)
   MX_LPUART1_UART_Init();
   SystemIsolation_Config();
   /* USER CODE BEGIN 2 */
+  
+  // a) Power the RAM up by writing 0 to SRAMSD in RAMCFG_AXISRAMxCR
+  // b) Read back the value from the RAMCFG (alternatively, wait 40 ns)
+  // c) Enable the RAM clock through the RCC. (RCC_MEMENR)
+  uint32_t readback;
+  // AXISRAM3
+  RAMCFG_SRAM3_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
+  readback = RAMCFG_SRAM3_AXI_NS->CR;
+  __HAL_RCC_AXISRAM3_MEM_CLK_ENABLE();
+  // AXISRAM4
+  RAMCFG_SRAM4_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
+  readback = RAMCFG_SRAM4_AXI_NS->CR;
+  __HAL_RCC_AXISRAM4_MEM_CLK_ENABLE();
+  // AXISRAM5
+  RAMCFG_SRAM5_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
+  readback = RAMCFG_SRAM5_AXI_NS->CR;
+  __HAL_RCC_AXISRAM5_MEM_CLK_ENABLE();
+  // AXISRAM6
+  RAMCFG_SRAM6_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
+  readback = RAMCFG_SRAM6_AXI_NS->CR;
+  __HAL_RCC_AXISRAM6_MEM_CLK_ENABLE();
+
   /* --- AXISRAM: first word of each section --- */
   mem_print("AXISRAM1", 0x34000000UL);
   mem_print("AXISRAM2", 0x34100000UL);
