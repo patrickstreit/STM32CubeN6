@@ -96,57 +96,8 @@ int main(void)
   SystemIsolation_Config();
   MX_EXTMEM_MANAGER_Init();
   /* USER CODE BEGIN 2 */
-  /* -----------------------------------------------------------------------
-   * XSPI1 / APS256XX PSRAM — memory-mapped read/write setup
-   * Must complete before BOOT_Application() so the Appli finds PSRAM ready.
-   * ----------------------------------------------------------------------- */
-  {
-    XSPI_RegularCmdTypeDef   sCommand      = {0};
-    XSPI_MemoryMappedTypeDef sMemMappedCfg = {0};
-
-    /* Bypass the prescaler set during MX_XSPI1_Init (prescaler=1 → /2).
-     * Setting it to 0 runs XSPI1 at the full input clock frequency. */
-    if (HAL_XSPI_SetClockPrescaler(&hxspi1, 0) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-    /* Write command: APS256XX synchronous write (OPI, 8-line cmd STR,
-     * 32-bit address DTR, 16-line data DTR, DQS enabled). */
-    sCommand.OperationType      = HAL_XSPI_OPTYPE_WRITE_CFG;
-    sCommand.InstructionMode    = HAL_XSPI_INSTRUCTION_8_LINES;
-    sCommand.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
-    sCommand.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    sCommand.Instruction        = 0x80U; /* Synchronous Write */
-    sCommand.AddressMode        = HAL_XSPI_ADDRESS_8_LINES;
-    sCommand.AddressWidth       = HAL_XSPI_ADDRESS_32_BITS;
-    sCommand.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_ENABLE;
-    sCommand.DataMode           = HAL_XSPI_DATA_16_LINES;
-    sCommand.DataDTRMode        = HAL_XSPI_DATA_DTR_ENABLE;
-    sCommand.DummyCycles        = 6U;
-    sCommand.DQSMode            = HAL_XSPI_DQS_ENABLE;
-    if (HAL_XSPI_Command(&hxspi1, &sCommand, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-    /* Read command: APS256XX synchronous read (same protocol, 6 dummy cycles). */
-    sCommand.OperationType = HAL_XSPI_OPTYPE_READ_CFG;
-    sCommand.Instruction   = 0x00U; /* Synchronous Read */
-    sCommand.DummyCycles   = 6U;
-    if (HAL_XSPI_Command(&hxspi1, &sCommand, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-    /* Enable memory-mapped mode — PSRAM appears as plain R/W RAM at 0x90000000. */
-    sMemMappedCfg.TimeOutActivation  = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
-    sMemMappedCfg.TimeoutPeriodClock = 0x34U;
-    if (HAL_XSPI_MemoryMapped(&hxspi1, &sMemMappedCfg) != HAL_OK)
-    {
-      Error_Handler();
-    }
-  }
+  /* XSPI1 PSRAM memory-mapped mode is handled by MX_EXTMEM_MANAGER_Init()
+   * and BOOT_Application() -> MapMemory(). No manual setup needed here. */
   /* USER CODE END 2 */
 
   /* Launch the application */
