@@ -77,12 +77,12 @@ void MX_EXTMEM_MANAGER_Init(void)
   extmem_list_config[0].PsramObject.psram_public.ReadREG           = 0x40u;
   extmem_list_config[0].PsramObject.psram_public.WriteREG          = 0xC0u;
   extmem_list_config[0].PsramObject.psram_public.ReadREGSize       = 2u;
-  extmem_list_config[0].PsramObject.psram_public.REG_DummyCycle    = 4u;
-  extmem_list_config[0].PsramObject.psram_public.Write_command     = 0xA0u;
-  extmem_list_config[0].PsramObject.psram_public.Write_DummyCycle  = 4u;
-  extmem_list_config[0].PsramObject.psram_public.Read_command      = 0x20u;
+  extmem_list_config[0].PsramObject.psram_public.REG_DummyCycle    = 5u;
+  extmem_list_config[0].PsramObject.psram_public.Write_command     = 0x80u;
+  extmem_list_config[0].PsramObject.psram_public.Write_DummyCycle  = 6u;
+  extmem_list_config[0].PsramObject.psram_public.Read_command      = 0x00u;
   extmem_list_config[0].PsramObject.psram_public.WrapRead_command  = 0x00u;
-  extmem_list_config[0].PsramObject.psram_public.Read_DummyCycle   = 4u;
+  extmem_list_config[0].PsramObject.psram_public.Read_DummyCycle   = 6u;
 
   /* EXTMEMORY_2 */
   extmem_list_config[1].MemType = EXTMEM_NOR_SFDP;
@@ -93,6 +93,50 @@ void MX_EXTMEM_MANAGER_Init(void)
   EXTMEM_Init(EXTMEMORY_2, HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_XSPI2));
 
   /* USER CODE BEGIN MX_EXTMEM_Init_PostTreatment */
+  /* APS256XX PSRAM — configure MR0/MR4/MR8 before MapMemory() activates
+   * memory-mapped mode.  Must match the EXTMEM params above:
+   *   Fixed Latency, LC=6  →  6 read/write dummy cycles
+   * After EXTMEM_Init(EXTMEMORY_1) hxspi1 is in READY state at 32 MHz
+   * (SAL_XSPI_SetClock already set prescaler=0).
+   * Reference: XSPI_PSRAM_MemoryMapped/FSBL/Core/Src/main.c Configure_APMemory()
+   */
+  {
+    XSPI_RegularCmdTypeDef aps_cmd = {0};
+    uint8_t mr_val[2];
 
+    /* Common fields for all three register writes */
+    aps_cmd.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    aps_cmd.InstructionMode    = HAL_XSPI_INSTRUCTION_8_LINES;
+    aps_cmd.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
+    aps_cmd.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
+    aps_cmd.Instruction        = 0xC0U;   /* WRITE_REG_CMD */
+    aps_cmd.AddressMode        = HAL_XSPI_ADDRESS_8_LINES;
+    aps_cmd.AddressWidth       = HAL_XSPI_ADDRESS_32_BITS;
+    aps_cmd.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_ENABLE;
+    aps_cmd.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
+    aps_cmd.DataMode           = HAL_XSPI_DATA_8_LINES;
+    aps_cmd.DataDTRMode        = HAL_XSPI_DATA_DTR_ENABLE;
+    aps_cmd.DataLength         = 2U;
+    aps_cmd.DummyCycles        = 0U;
+    aps_cmd.DQSMode            = HAL_XSPI_DQS_DISABLE;
+
+    /* MR0 = {0x30, 0x8D}: Fixed Latency, Read Latency Code, Drive Strength */
+    aps_cmd.Address = 0x00000000U;
+    (void)HAL_XSPI_Command(&hxspi1, &aps_cmd, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+    mr_val[0] = 0x30U; mr_val[1] = 0x8DU;
+    (void)HAL_XSPI_Transmit(&hxspi1, mr_val, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+
+    /* MR4 = {0x20, 0xF0}: Write Latency Code */
+    aps_cmd.Address = 0x00000004U;
+    (void)HAL_XSPI_Command(&hxspi1, &aps_cmd, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+    mr_val[0] = 0x20U; mr_val[1] = 0xF0U;
+    (void)HAL_XSPI_Transmit(&hxspi1, mr_val, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+
+    /* MR8 = {0x4B, 0x08}: Burst Type (Linear Burst enabled) */
+    aps_cmd.Address = 0x00000008U;
+    (void)HAL_XSPI_Command(&hxspi1, &aps_cmd, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+    mr_val[0] = 0x4BU; mr_val[1] = 0x08U;
+    (void)HAL_XSPI_Transmit(&hxspi1, mr_val, HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
+  }
   /* USER CODE END MX_EXTMEM_Init_PostTreatment */
 }
