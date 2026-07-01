@@ -12,10 +12,10 @@
  * the impact of each optimization knob on the heavy 4 MB PSRAM->PSRAM copy, so
  * the effect of every lever is visible on the UART (with a factor vs baseline):
  *
- *   1. DMA chunked, burst 16, refresh 400   (baseline)
- *   2. DMA chunked, burst 64, refresh 400   (+ longer bursts)
- *   3. DMA LLI,     burst 64, refresh 400   (+ hardware linked-list, no CPU gap)
- *   4. DMA LLI,     burst 64, refresh 700   (+ fewer refresh CS turnarounds)
+ *   1. DMA chunked, word,  burst 16, refresh 400   (baseline)
+ *   2. DMA LLI,     word,  burst 16, refresh 400   (+ hardware linked-list)
+ *   3. DMA LLI,     dword, burst 8,  refresh 400   (+ 64-bit beats, wider FIFO)
+ *   4. DMA LLI,     word,  burst 16, refresh 700   (+ fewer refresh CS turns)
  *
  * DCR4 (refresh) is changed at runtime between runs and restored afterwards.
  * 700 cycles @ 200 MHz kernel = 3.5 us, still below the ~4 us tCEM limit.
@@ -31,6 +31,8 @@
 #define BENCH_REFRESH_TUNE (700U)                 /* ~3.5 us, still < tCEM       */
 
 #define BENCH_LLI_DEBUG    0                       /* 1 = dump LLI regs (pollutes timing) */
+#define BENCH_HPDMA_CID_TEST 1                     /* 1 = LLI on HPDMA1_Ch12 + CID isolation
+                                                     (NUCLEO DMA_RAMToRAM), 0 = GPDMA1_Ch12 */
 
 /* ---------------------------------------------------------------------------
  * HPDMA1 addressing / security (STM32N6, secure build):
@@ -212,15 +214,17 @@ static void set_refresh(uint32_t cycles)
 /* Common DMA Init fill (single-block and linked-list share the same config)    */
 /* --------------------------------------------------------------------------- */
 
-static void dma_fill_init(DMA_InitTypeDef *init, uint32_t burst)
+static void dma_fill_init(DMA_InitTypeDef *init, uint32_t burst, uint32_t dword)
 {
   init->Request             = DMA_REQUEST_SW;
   init->BlkHWRequest        = DMA_BREQ_SINGLE_BURST;
   init->Direction           = DMA_MEMORY_TO_MEMORY;
   init->SrcInc              = DMA_SINC_INCREMENTED;
   init->DestInc             = DMA_DINC_INCREMENTED;
-  init->SrcDataWidth        = DMA_SRC_DATAWIDTH_WORD;
-  init->DestDataWidth       = DMA_DEST_DATAWIDTH_WORD;
+  init->SrcDataWidth        = dword ? DMA_SRC_DATAWIDTH_DOUBLEWORD
+                                    : DMA_SRC_DATAWIDTH_WORD;
+  init->DestDataWidth       = dword ? DMA_DEST_DATAWIDTH_DOUBLEWORD
+                                    : DMA_DEST_DATAWIDTH_WORD;
   init->Priority            = DMA_HIGH_PRIORITY;
   init->SrcBurstLength      = burst;
   init->DestBurstLength     = burst;
@@ -248,7 +252,7 @@ static uint32_t dma_copy_chunked(void *dst, const void *src, uint32_t bytes,
 
   memset(&hdma, 0, sizeof(hdma));
   hdma.Instance = HPDMA1_Channel0;
-  dma_fill_init(&hdma.Init, burst);
+  dma_fill_init(&hdma.Init, burst, 0U);
 
   if (HAL_DMA_Init(&hdma) != HAL_OK)
   {
@@ -289,25 +293,43 @@ static uint32_t dma_copy_chunked(void *dst, const void *src, uint32_t bytes,
 /* --------------------------------------------------------------------------- */
 
 static uint32_t dma_copy_lli(void *dst, const void *src, uint32_t bytes,
-                             uint32_t burst, uint32_t *ok)
+                             uint32_t burst, uint32_t dword, uint32_t *ok)
 {
   DMA_HandleTypeDef   hdma;
   DMA_NodeConfTypeDef ncfg;
 
-  __HAL_RCC_GPDMA1_CLK_ENABLE();   /* DIAG: use GPDMA1 (ST's proven LLI engine) */
+#if BENCH_HPDMA_CID_TEST
+  __HAL_RCC_HPDMA1_CLK_ENABLE();
+#else
+  __HAL_RCC_GPDMA1_CLK_ENABLE();
+#endif
 
   /* Build the queue of linear nodes covering the whole transfer. */
   memset(&bench_qlist, 0, sizeof(bench_qlist));
   memset(&ncfg, 0, sizeof(ncfg));
+#if BENCH_HPDMA_CID_TEST
+  ncfg.NodeType = DMA_HPDMA_LINEAR_NODE;
+#else
   ncfg.NodeType = DMA_GPDMA_LINEAR_NODE;
-  dma_fill_init(&ncfg.Init, burst);
+#endif
+  dma_fill_init(&ncfg.Init, burst, dword);
 
   /* AXISRAM is only reachable through the AXI port (port 0). Keep the source
    * on AXI and move the destination to AXI whenever it targets AXISRAM,
-   * otherwise keep it on AHB (port 1) to overlap read/write for PSRAM->PSRAM. */
+   * otherwise keep it on AHB (port 1) to overlap read/write for PSRAM->PSRAM.
+   * Exception: 64-bit (doubleword) width on the AHB port is a forbidden user
+   * setting (RM0486 Table 91) -> force the destination to the AXI port too. */
   {
-    uint32_t dport = IS_AXISRAM(dst) ? DMA_DEST_ALLOCATED_PORT0
-                                     : DMA_DEST_ALLOCATED_PORT1;
+    uint32_t dport;
+    if (dword)
+    {
+      dport = DMA_DEST_ALLOCATED_PORT0;
+    }
+    else
+    {
+      dport = IS_AXISRAM(dst) ? DMA_DEST_ALLOCATED_PORT0
+                              : DMA_DEST_ALLOCATED_PORT1;
+    }
     ncfg.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | dport;
   }
 
@@ -358,12 +380,16 @@ static uint32_t dma_copy_lli(void *dst, const void *src, uint32_t bytes,
   }
 
   memset(&hdma, 0, sizeof(hdma));
-  /* GPDMA1_Channel12 drives the linked list. HPDMA1 raises a USE (user-setting)
-   * error at channel enable in linked-list mode on this part, while GPDMA1 (the
-   * engine used by ST's DMA_LinkedList example) works. Channels 12..15 carry the
-   * 64-byte FIFO + 2D engine required to reach AXI external memory (PSRAM),
-   * RM0486 Table 84; channels 0..11 cannot address external AXI memory. */
+  /* Channels 12..15 carry the 64-byte FIFO + 2D engine required to reach AXI
+   * external memory (PSRAM), RM0486 Table 84; channels 0..11 cannot address
+   * external AXI memory. GPDMA1 runs the linked list out of the box; HPDMA1
+   * additionally needs per-channel CID isolation (see below) or it raises a USE
+   * (user-setting) error at channel enable before the first descriptor fetch. */
+#if BENCH_HPDMA_CID_TEST
+  hdma.Instance                         = HPDMA1_Channel12;
+#else
   hdma.Instance                         = GPDMA1_Channel12;
+#endif
   hdma.InitLinkedList.Priority          = DMA_HIGH_PRIORITY;
   hdma.InitLinkedList.LinkStepMode      = DMA_LSM_FULL_EXECUTION;
   hdma.InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT0;
@@ -387,6 +413,27 @@ static uint32_t dma_copy_lli(void *dst, const void *src, uint32_t bytes,
     *ok = 0U;
     return 0U;
   }
+
+#if BENCH_HPDMA_CID_TEST
+  /* HPDMA gates the descriptor fetch and the data accesses through per-channel
+   * CID filtering (CCIDCFGR). Align the channel to CID_1 -- the CPU's CID, which
+   * already owns the PSRAM and AXISRAM RISAF whitelists -- so the linked-list
+   * fetch is authorized. Without this the channel presents a mismatched CID and
+   * HPDMA raises USE at enable. Matches the NUCLEO DMA_RAMToRAM example.
+   * HPDMA-only, secure build only. */
+  {
+    DMA_IsolationConfigTypeDef iso = {
+      .CidFiltering = DMA_ISOLATION_ON,
+      .StaticCid    = DMA_CHANNEL_STATIC_CID_1,
+    };
+    if (HAL_DMA_SetIsolationAttributes(&hdma, &iso) != HAL_OK)
+    {
+      bench_puts("   [lli fail: Isolation]\r\n");
+      *ok = 0U;
+      return 0U;
+    }
+  }
+#endif
 
   if (HAL_DMAEx_List_LinkQ(&hdma, &bench_qlist) != HAL_OK)
   {
@@ -514,16 +561,16 @@ void PSRAM_Bench_Run(UART_HandleTypeDef *huart)
   base = bench_report("0 base chunk16 rfr400", BENCH_PSRAM_SIZE, ok ? cyc : 0U, 0U);
 
   /* Lever A1: hardware linked-list instead of CPU-restarted chunks. */
-  cyc = dma_copy_lli(bench_b, bench_a, BENCH_PSRAM_SIZE, 16U, &ok);
+  cyc = dma_copy_lli(bench_b, bench_a, BENCH_PSRAM_SIZE, 16U, 0U, &ok);
   (void)bench_report("A LLI  (vs base)", BENCH_PSRAM_SIZE, ok ? cyc : 0U, base);
 
-  /* Lever A2: longer bursts (64). Needs single AXI port -> loses the split. */
-  cyc = dma_copy_chunked(bench_b, bench_a, BENCH_PSRAM_SIZE, 64U, &ok);
-  (void)bench_report("A burst64 (vs base)", BENCH_PSRAM_SIZE, ok ? cyc : 0U, base);
+  /* Lever A2: 64-bit (doubleword) beats, burst 8 -> fills the 64-byte FIFO. */
+  cyc = dma_copy_lli(bench_b, bench_a, BENCH_PSRAM_SIZE, 8U, 1U, &ok);
+  (void)bench_report("A LLI dword (vs base)", BENCH_PSRAM_SIZE, ok ? cyc : 0U, base);
 
   /* Lever B: refresh 400 -> 700 (fewer CS turnarounds), on the LLI variant. */
   set_refresh(BENCH_REFRESH_TUNE);
-  cyc = dma_copy_lli(bench_b, bench_a, BENCH_PSRAM_SIZE, 16U, &ok);
+  cyc = dma_copy_lli(bench_b, bench_a, BENCH_PSRAM_SIZE, 16U, 0U, &ok);
   (void)bench_report("B LLI+rfr700 (vs base)", BENCH_PSRAM_SIZE, ok ? cyc : 0U, base);
 
   set_refresh(refresh0);   /* restore the safe FSBL value */
@@ -532,11 +579,11 @@ void PSRAM_Bench_Run(UART_HandleTypeDef *huart)
   bench_puts("-- LLI burst16 P<->int (64 KB) --\r\n");
 
   set_refresh(BENCH_REFRESH_TUNE);
-  cyc = dma_copy_lli(bench_int, bench_a, BENCH_INT_SIZE, 16U, &ok);
+  cyc = dma_copy_lli(bench_int, bench_a, BENCH_INT_SIZE, 16U, 0U, &ok);
   (void)bench_report("DMA P->int", BENCH_INT_SIZE, ok ? cyc : 0U, 0U);
 
   SCB_CleanDCache_by_Addr((uint32_t *)bench_int, (int32_t)BENCH_INT_SIZE);
-  cyc = dma_copy_lli(bench_a, bench_int, BENCH_INT_SIZE, 16U, &ok);
+  cyc = dma_copy_lli(bench_a, bench_int, BENCH_INT_SIZE, 16U, 0U, &ok);
   (void)bench_report("DMA int->P", BENCH_INT_SIZE, ok ? cyc : 0U, 0U);
 
   set_refresh(refresh0);
