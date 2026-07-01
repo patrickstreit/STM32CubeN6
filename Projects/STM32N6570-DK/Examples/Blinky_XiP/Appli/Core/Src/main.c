@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "psram_bench.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,6 +102,9 @@ int main(void)
   readback = RAMCFG_SRAM6_AXI_NS->CR;
   __HAL_RCC_AXISRAM6_MEM_CLK_ENABLE();
   (void)readback;
+
+  /* Optional PSRAM throughput benchmark (no-op unless built with PSRAM_BENCH). */
+  PSRAM_Bench_Run(&hlpuart1);
 
   /* USER CODE END 2 */
 

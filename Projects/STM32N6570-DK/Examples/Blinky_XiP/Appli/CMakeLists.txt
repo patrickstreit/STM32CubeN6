@@ -43,9 +43,13 @@ include("mx-generated.cmake")
 # In order to use CMake for cross-compiling
 set(CMAKE_CXX_COMPILER_FORCED "true")
 
+# Optional PSRAM throughput benchmark (enabled by the "Debug + Bench" preset)
+option(PSRAM_BENCH "Build the PSRAM throughput benchmark" OFF)
+
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    $<$<BOOL:${PSRAM_BENCH}>:PSRAM_BENCH_ENABLE>
 )
 
 # Enable CMake support for ASM and C languages
@@ -61,6 +65,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/venc_buffers.c
 )
+
+# Optional benchmark source (only compiled when PSRAM_BENCH=ON)
+if(PSRAM_BENCH)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+        Core/Src/psram_bench.c
+    )
+    message(STATUS "PSRAM benchmark enabled (PSRAM_BENCH_ENABLE)")
+endif()
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE

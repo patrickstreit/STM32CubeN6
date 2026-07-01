@@ -18,6 +18,15 @@
             }
         },
         {
+            "name": "Debug + Bench",
+            "displayName": "Debug + Bench",
+            "inherits": "Debug",
+            "binaryDir": "${sourceDir}/build/Debug-Bench",
+            "cacheVariables": {
+                "PSRAM_BENCH": "ON"
+            }
+        },
+        {
             "name": "Release",
             "inherits": "default",
             "cacheVariables": {
@@ -29,6 +38,11 @@
         {
             "name": "Debug",
             "configurePreset": "Debug"
+        },
+        {
+            "name": "Debug + Bench",
+            "displayName": "Debug + Bench",
+            "configurePreset": "Debug + Bench"
         },
         {
             "name": "Release",
