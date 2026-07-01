@@ -73,11 +73,13 @@ Interpretation:
   word). Dominated by command/latency phase and the DCR4 refresh (CS released
   ~every 2 us). This is the worst case, not representative of cached bulk access.
 - None of these numbers are limited by raw bus bandwidth. The PSRAM is an
-  octal **x8 DDR** device (`PHY_LINK_RAM8`); at the 200 MHz XSPI kernel the raw
-  peak is ~400 MB/s, and a P->P copy (each byte crosses the bus twice) has a
-  ceiling of ~200 MB/s. The CPU memcpy (4 MB/s) and chunked DMA (30 MB/s) are far
-  below that, so they are *transaction-overhead* bound (command/latency phase +
-  refresh turnaround), not bandwidth bound.
+  APS256 **x16 Hexa-SPI DDR** device (`EXTMEM_LINK_CONFIG_16LINES` ->
+  `PHY_LINK_RAM16`; the `PHY_LINK_RAM8` in the driver is only the register/command
+  phase). At the 200 MHz XSPI kernel the raw peak is ~800 MB/s, and a P->P copy
+  (each byte crosses the bus twice) has a ceiling of ~400 MB/s. The CPU memcpy
+  (4 MB/s) and chunked DMA (30 MB/s) are far below that, so they are
+  *transaction-overhead* bound (command/latency phase + refresh turnaround), not
+  bandwidth bound.
 - The difference is purely how well the fixed per-transaction overhead is
   amortized:
     - CPU memcpy stalls on every memory-mapped access until the XSPI
@@ -85,25 +87,31 @@ Interpretation:
     - DMA (HPDMA1_Ch12 LLI) issues back-to-back 16-beat bursts (64 B) and its
       FIFO decouples read from write => same overhead spread over far more
       payload => ~3.5x faster than chunked, over the *same* shared bus.
-- The shared octal bus explains the *relative* penalty of P->P vs P<->int
-  (read + write + turnaround on one bus): P->P (104 MB/s) is essentially at the
-  serial read+write limit 1/(1/284 + 1/191) ~= 114 MB/s of the single interface.
-- Direction matters: with one side in internal SRAM, DMA reaches 284 MB/s (read,
-  71 % of the ~400 MB/s peak) and 191 MB/s (write) because only one side is the
-  slow PSRAM and the bus is not simultaneously reading+writing PSRAM.
+- Even the best figures are well below raw bandwidth: P->int read 284 MB/s is
+  only ~36 % of the ~800 MB/s peak, int->P write 191 MB/s ~24 %, and P->P
+  104 MB/s ~26 % of the ~400 MB/s P->P ceiling. So we are NOT bandwidth bound;
+  the limiter is the fixed per-64B-burst protocol overhead (instruction +
+  32-bit address + 6 dummy cycles + refresh) amortized over only 64 payload
+  bytes. The DMA FIFO caps the burst at 64 B, so more amortization is not
+  reachable from the DMA side.
+- The shared bus still explains the *relative* penalty of P->P vs P<->int: P->P
+  (104 MB/s) sits near the serial read+write limit 1/(1/284 + 1/191) ~= 114 MB/s
+  of the single interface (read + write + turnaround on one bus).
 - Doubleword (64-bit) DMA beats do NOT help: the XSPI controller serialises any
-  AXI beat width into the same x8 DDR pin stream, so the physical transfer is
-  unchanged (measured identical to word). The only real bandwidth lever left is a
-  higher XSPI kernel clock (if the PSRAM rating + signal integrity allow it).
+  AXI beat width into the same x16 DDR pin stream, so the physical transfer is
+  unchanged (measured identical to word). The remaining bandwidth levers are on
+  the XSPI side (higher kernel clock, fewer dummy cycles / read latency), not the
+  DMA beat width.
 
 Takeaways for the VENC pipeline:
 - Move bulk data with DMA (bursts), never word-wise CPU/`volatile` access.
 - Use a hardware linked-list on HPDMA1_Channel12 (+ CID isolation) for large
   streams: 104 MB/s, ~3.5x over CPU-restarted chunks, zero CPU involvement.
 - Prefer staging through internal SRAM over PSRAM->PSRAM copies: a one-directional
-  PSRAM read hits 284 MB/s vs. 104 MB/s for a P->P copy on the single octal bus.
+  PSRAM read hits 284 MB/s vs. 104 MB/s for a P->P copy on the single Hexa bus.
 - Doubleword DMA beats and DCR4 refresh tuning give no gain here; the DMA path is
-  tuned. The remaining bandwidth lever is the XSPI kernel clock, not the DMA.
-- Reported numbers are effective end-to-end (incl. cache maintenance), below the
-  ~400 MB/s raw x8 DDR peak, which is expected for isolated block transfers with
-  per-burst command/latency + refresh turnaround.
+  tuned. The remaining bandwidth levers are XSPI-side (kernel clock, read
+  latency), not the DMA.
+- Reported numbers are effective end-to-end (incl. cache maintenance), well below
+  the ~800 MB/s raw x16 DDR peak, which is expected for isolated 64-byte-burst
+  transfers dominated by per-burst command/latency + refresh turnaround.
