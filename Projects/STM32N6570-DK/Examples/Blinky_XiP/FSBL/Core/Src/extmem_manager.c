@@ -27,7 +27,6 @@
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN PV */
-/* Private variables ---------------------------------------------------------*/
 
 /* USER CODE END PV */
 
@@ -96,8 +95,8 @@ void MX_EXTMEM_MANAGER_Init(void)
   /* APS256XX PSRAM — configure MR0/MR4/MR8 before MapMemory() activates
    * memory-mapped mode.  Must match the EXTMEM params above:
    *   Fixed Latency, LC=6  →  6 read/write dummy cycles
-   * After EXTMEM_Init(EXTMEMORY_1) hxspi1 is in READY state at 32 MHz
-   * (SAL_XSPI_SetClock already set prescaler=0).
+   * After EXTMEM_Init(EXTMEMORY_1) hxspi1 is in READY state; SAL_XSPI_SetClock
+   * derives the prescaler from FreqMax=200 MHz and the XSPI1 kernel clock.
    * Reference: XSPI_PSRAM_MemoryMapped/FSBL/Core/Src/main.c Configure_APMemory()
    */
   {

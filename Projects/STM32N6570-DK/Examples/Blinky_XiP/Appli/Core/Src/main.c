@@ -21,9 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
-#include <string.h>
-#include "venc_buffers.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,13 +55,7 @@ static void MX_LPUART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void mem_print(const char *label, uint32_t addr)
-{
-  char buf[64];
-  volatile uint32_t val = *(volatile uint32_t *)addr;
-  int len = snprintf(buf, sizeof(buf), "%s [0x%08X] = 0x%08X\r\n", label, (unsigned)addr, (unsigned)val);
-  HAL_UART_Transmit(&hlpuart1, (uint8_t *)buf, (uint16_t)len, 100);
-}
+
 /* USER CODE END 0 */
 
 /**
@@ -97,83 +89,20 @@ int main(void)
   // b) Read back the value from the RAMCFG (alternatively, wait 40 ns)
   // c) Enable the RAM clock through the RCC. (RCC_MEMENR)
   uint32_t readback;
-  // AXISRAM3
   RAMCFG_SRAM3_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
   readback = RAMCFG_SRAM3_AXI_NS->CR;
   __HAL_RCC_AXISRAM3_MEM_CLK_ENABLE();
-  // AXISRAM4
   RAMCFG_SRAM4_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
   readback = RAMCFG_SRAM4_AXI_NS->CR;
   __HAL_RCC_AXISRAM4_MEM_CLK_ENABLE();
-  // AXISRAM5
   RAMCFG_SRAM5_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
   readback = RAMCFG_SRAM5_AXI_NS->CR;
   __HAL_RCC_AXISRAM5_MEM_CLK_ENABLE();
-  // AXISRAM6
   RAMCFG_SRAM6_AXI_NS->CR &= ~RAMCFG_CR_SRAMSD;
   readback = RAMCFG_SRAM6_AXI_NS->CR;
   __HAL_RCC_AXISRAM6_MEM_CLK_ENABLE();
+  (void)readback;
 
-  /* --- AXISRAM: first word of each section --- */
-  mem_print("AXISRAM1", 0x34000000UL);
-  mem_print("AXISRAM2", 0x34100000UL);
-  mem_print("AXISRAM3", 0x34200000UL);
-  mem_print("AXISRAM4", 0x34270000UL);
-  mem_print("AXISRAM5", 0x342E0000UL);
-  mem_print("AXISRAM6", 0x34350000UL);
-
-  /* --- XSPI2 Flash: FSBL header, FSBL vector table, Appli header, Appli vector table --- */
-  mem_print("FSBL hdr [0]",  0x70000000UL);
-  mem_print("FSBL code[0]",  0x70000400UL);
-  mem_print("Appli hdr [0]", 0x70100000UL);
-  mem_print("Appli code[0]", 0x70100400UL);
-
-  /* --- PSRAM Ping-Pong Buffer Performance Test (XSPI1 @ 0x90000000) --- */
-  {
-    /* Enable DWT cycle counter for timing measurements */
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0;
-    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
-
-    typedef struct { const char *name; uint8_t *buf; uint32_t size; } BufDesc;
-    const BufDesc bufs[] = {
-      { "frame_ping", frame_ping, VENC_FRAME_BUF_SIZE     },
-      { "frame_pong", frame_pong, VENC_FRAME_BUF_SIZE     },
-      { "bs_ping",    bs_ping,    VENC_BITSTREAM_BUF_SIZE },
-      { "bs_pong",    bs_pong,    VENC_BITSTREAM_BUF_SIZE },
-    };
-
-    char ubuf[96];
-    uint32_t clk = SystemCoreClock;
-
-    for (unsigned i = 0; i < 4U; i++)
-    {
-      uint8_t  *p  = bufs[i].buf;
-      uint32_t  sz = bufs[i].size;
-
-      /* Sequential write: fill with incrementing byte pattern */
-      DWT->CYCCNT = 0;
-      for (uint32_t j = 0; j < sz; j++) p[j] = (uint8_t)j;
-      uint32_t wcycles = DWT->CYCCNT;
-
-      /* Sequential read + verify */
-      uint32_t errors = 0;
-      DWT->CYCCNT = 0;
-      for (uint32_t j = 0; j < sz; j++) if (p[j] != (uint8_t)j) errors++;
-      uint32_t rcycles = DWT->CYCCNT;
-
-      uint32_t wmbs = (wcycles > 0U) ?
-          (uint32_t)((uint64_t)sz * clk / wcycles / (1024UL * 1024UL)) : 0U;
-      uint32_t rmbs = (rcycles > 0U) ?
-          (uint32_t)((uint64_t)sz * clk / rcycles / (1024UL * 1024UL)) : 0U;
-
-      int len = snprintf(ubuf, sizeof(ubuf),
-          "[PSRAM] %-10s wr:%4u MB/s  rd:%4u MB/s  %s\r\n",
-          bufs[i].name, (unsigned)wmbs, (unsigned)rmbs,
-          errors == 0U ? "OK" : "FAIL");
-      HAL_UART_Transmit(&hlpuart1, (uint8_t *)ubuf, (uint16_t)len, 500);
-    }
-  }
   /* USER CODE END 2 */
 
   /* Infinite loop */

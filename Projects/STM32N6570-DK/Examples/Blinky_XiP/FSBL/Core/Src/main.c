@@ -197,13 +197,22 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_PCLK1
                               |RCC_CLOCKTYPE_PCLK2|RCC_CLOCKTYPE_PCLK5
                               |RCC_CLOCKTYPE_PCLK4;
-  RCC_ClkInitStruct.CPUCLKSource = RCC_CPUCLKSOURCE_HSI;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.CPUCLKSource = RCC_CPUCLKSOURCE_IC1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_IC2_IC6_IC11;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
   RCC_ClkInitStruct.APB5CLKDivider = RCC_APB5_DIV1;
+  RCC_ClkInitStruct.IC1Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+  RCC_ClkInitStruct.IC1Selection.ClockDivider = 3;
+  RCC_ClkInitStruct.IC2Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+  RCC_ClkInitStruct.IC2Selection.ClockDivider = 4;
+  RCC_ClkInitStruct.IC6Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+  RCC_ClkInitStruct.IC6Selection.ClockDivider = 4;
+  RCC_ClkInitStruct.IC11Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+  RCC_ClkInitStruct.IC11Selection.ClockDivider = 4;
+
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -318,7 +327,16 @@ static void MX_XSPI1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN XSPI1_Init 2 */
-
+  /* APS256XX is a DRAM-core PSRAM and must refresh: the chip select may stay
+   * low at most tCEM (~4 us) or rows lose their charge. In memory-mapped mode
+   * a long linear CPU sweep keeps CS low far longer, which corrupts data on
+   * large (multi-MB) accesses while short ones still pass.
+   * DCR4 = Refresh: the controller releases CS every (Refresh+1) XSPI clock
+   * cycles so the device can refresh. At 200 MHz (5 ns/cycle) tCEM = 4 us is
+   * 800 cycles; use ~2 us (400 cycles) for margin.
+   * Written here (not via Init.Refresh) so the SAL/EXTMEM prescaler change
+   * cannot clear it and CubeMX regeneration preserves it. */
+  XSPI1->DCR4 = 400U;
   /* USER CODE END XSPI1_Init 2 */
 
 }

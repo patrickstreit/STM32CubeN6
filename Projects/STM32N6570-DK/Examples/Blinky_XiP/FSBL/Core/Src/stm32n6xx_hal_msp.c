@@ -92,7 +92,13 @@ void HAL_XSPI_MspInit(XSPI_HandleTypeDef* hxspi)
   if(hxspi->Instance==XSPI1)
   {
     /* USER CODE BEGIN XSPI1_MspInit 0 */
-
+    /* High-speed low-voltage I/O for the XSPI1 pad domain (VDDIO2).
+     * Required to run the XSPI1/PSRAM interface at 200 MHz on 1.8 V I/O;
+     * without it the pads cannot switch fast enough and memory-mapped
+     * access to the PSRAM stalls. Matches the XSPI_PSRAM_MemoryMapped example. */
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWREx_EnableVddIO2();
+    HAL_PWREx_ConfigVddIORange(PWR_VDDIO2, PWR_VDDIO_RANGE_1V8);
     /* USER CODE END XSPI1_MspInit 0 */
 
   /** Initializes the peripherals clock
