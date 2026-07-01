@@ -20,16 +20,40 @@ Optional module `Appli/Core/Src/psram_bench.c`, enabled via CMake option
 `PSRAM_BENCH=ON` (preset "Debug + Bench"). Streams results over LPUART1.
 Measured with CPU @ 533 MHz, XSPI1 kernel @ 200 MHz, DCR4 refresh = 400.
 
-| Transfer          | Block | Time    | Throughput |
-| ----------------- | ----- | ------- | ---------- |
-| CPU write (word)  | 4 MB  | 2628 ms |  1.6 MB/s  |
-| CPU read  (word)  | 4 MB  | 2479 ms |  1.7 MB/s  |
-| CPU memcpy P->P   | 4 MB  | 1038 ms |  4.0 MB/s  |
-| DMA copy  P->P    | 4 MB  |  138 ms | 30.4 MB/s  |
-| CPU memcpy P->int | 64 KB | 3.98 ms | 16.5 MB/s  |
-| CPU memcpy int->P | 64 KB | 5.02 ms | 13.1 MB/s  |
-| DMA copy  P->int  | 64 KB | 1.35 ms | 48.6 MB/s  |
-| DMA copy  int->P  | 64 KB | 1.47 ms | 44.6 MB/s  |
+| Transfer                 | Block |    Time | Throughput |
+| ------------------------ | ----- | ------: | ---------: |
+| CPU write (word)         | 4 MB  | 2695 ms |   1.6 MB/s |
+| CPU read  (word)         | 4 MB  | 2504 ms |   1.7 MB/s |
+| CPU memcpy P->P          | 4 MB  | 1040 ms |   4.0 MB/s |
+| DMA copy  P->P (chunked) | 4 MB  |  138 ms |  30.4 MB/s |
+| DMA copy  P->P (LLI)     | 4 MB  |   99 ms |  42.5 MB/s |
+| DMA copy  P->int (LLI)   | 64 KB | 0.83 ms |  79.1 MB/s |
+| DMA copy  int->P (LLI)   | 64 KB | 0.81 ms |  80.8 MB/s |
+
+### DMA P->P lever study (isolated impact of one change per row)
+
+Baseline = chunked DMA, burst 16, split ports (src=AHB, dst=AXI), refresh 400.
+Each row toggles exactly one lever; the factor is the delta vs. that baseline.
+
+| Lever                        |    Time | Throughput | vs. base |
+| ---------------------------- | ------: | ---------: | -------: |
+| 0 · base (chunk burst16)     |  138 ms |  30.4 MB/s |        — |
+| A · hardware linked-list     |   99 ms |  42.5 MB/s |   x1.40  |
+| B · LLI + refresh 400->700   |   99 ms |  42.5 MB/s |   x1.40  |
+
+- **Lever A (linked-list): +40 %.** A single HW-chained node list removes the
+  CPU restart gap between chunks -> the whole 4 MB streams without CPU turnaround.
+- **Lever B (refresh 700): no effect.** At burst 16 the refresh CS turnaround is
+  not the bottleneck, so relaxing DCR4 refresh does not move the needle.
+
+> **Engine note:** the linked-list path runs on **GPDMA1_Channel12**, not HPDMA1.
+> On this part HPDMA1 raises a USE (user-setting) error (`CxSR` USEF) at channel
+> *enable* in linked-list mode, in every configuration (any channel, burst,
+> security, node location) - the error fires before the first node is fetched.
+> GPDMA1 (the engine ST's `DMA_LinkedList` example uses) runs the identical
+> descriptor list without error. Channels 12..15 are required for AXI external
+> memory (PSRAM) per RM0486 Table 84. Plain single-block chunked copies still
+> use HPDMA1_Channel0.
 
 Interpretation:
 - CPU word loop is `volatile` (uncached, single-beat) on purpose: every access
@@ -51,13 +75,16 @@ Interpretation:
 - The shared octal bus only explains the *relative* penalty of P->P vs P<->int
   (read + write + turnaround on one bus), not the absolute figure: DMA P->P at
   30 MB/s is still nowhere near the ~400 MB/s ceiling.
-- Direction matters: with one side in internal SRAM, DMA reaches 44-48 MB/s
+- Direction matters: with one side in internal SRAM, DMA reaches ~80 MB/s
   because only one side is the slow PSRAM and the bus is not simultaneously
   reading+writing PSRAM.
 
 Takeaways for the VENC pipeline:
 - Move bulk data with DMA (bursts), never word-wise CPU/`volatile` access.
-- Prefer staging through internal SRAM over PSRAM->PSRAM copies (~1.5x faster).
+- Use a hardware linked-list (GPDMA1) for large streams: +40 % over CPU-restarted
+  chunks (42 vs. 30 MB/s) with zero CPU involvement during the transfer.
+- Prefer staging through internal SRAM over PSRAM->PSRAM copies (~2x faster,
+  ~80 vs. 42 MB/s).
 - Reported numbers are effective end-to-end (incl. cache maintenance), well
   below the raw bus peak (~800 MB/s x16 DDR), which is expected for isolated
   block transfers with refresh turnaround.
