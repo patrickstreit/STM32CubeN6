@@ -21,7 +21,8 @@
             "name": "DebugWithOptions",
             "inherits": "Debug",
             "cacheVariables": {
-                "STRIP_IMX335": "ON"
+                "STRIP_IMX335": "ON",
+                "CMAKE_BUILD_TYPE": "DebugWithOptions"
             }
         },
         {

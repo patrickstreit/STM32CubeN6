@@ -10,8 +10,6 @@ set(CMAKE_PROJECT_NAME VENC_SDCard_ThreadX)
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
 
-message("   building. BUILD_TYPE: ${CMAKE_BUILD_TYPE} BUILD_CONTEXT: ${BUILD_CONTEXT} SOURCE_DIR: ${CMAKE_SOURCE_DIR} BINARY_DIR: ${CMAKE_BINARY_DIR}")
-
 #
 # Dual-image boot layout (LRUN): the FSBL and the Appli are built as two
 # independent firmware images via ExternalProject_Add and signed separately.
@@ -24,7 +22,7 @@ set(ST_MULTICONTEXT BOOT_FLASH CACHE STRING "Type of multi-context")
 if((${BUILD_CONTEXT} MATCHES .*FSBL.*) OR (NOT DEFINED BUILD_CONTEXT))
     message("   Build context: " FSBL)
     ExternalProject_Add(VENC_SDCard_ThreadX_FSBL
-        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/FSBL/build
+        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/FSBL/build/${CMAKE_BUILD_TYPE}
         SOURCE_DIR                  ${PROJECT_SOURCE_DIR}/FSBL
         PREFIX                      FSBL
         CONFIGURE_HANDLED_BY_BUILD  true
@@ -32,14 +30,14 @@ if((${BUILD_CONTEXT} MATCHES .*FSBL.*) OR (NOT DEFINED BUILD_CONTEXT))
         CMAKE_ARGS                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         BUILD_ALWAYS                true
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/FSBL/build")
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/FSBL/build/${CMAKE_BUILD_TYPE}")
 endif()
 
 #-----------------------Build Appli Project-----------------------#
 if((${BUILD_CONTEXT} MATCHES .*Appli.*) OR (NOT DEFINED BUILD_CONTEXT))
     message("   Build context: " Appli)
     ExternalProject_Add(VENC_SDCard_ThreadX_Appli
-        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/Appli/build
+        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/Appli/build/${CMAKE_BUILD_TYPE}
         SOURCE_DIR                  ${PROJECT_SOURCE_DIR}/Appli
         PREFIX                      Appli
         CONFIGURE_HANDLED_BY_BUILD  true
@@ -47,5 +45,5 @@ if((${BUILD_CONTEXT} MATCHES .*Appli.*) OR (NOT DEFINED BUILD_CONTEXT))
         CMAKE_ARGS                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         BUILD_ALWAYS                true
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/Appli/build")
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/Appli/build/${CMAKE_BUILD_TYPE}")
 endif()
