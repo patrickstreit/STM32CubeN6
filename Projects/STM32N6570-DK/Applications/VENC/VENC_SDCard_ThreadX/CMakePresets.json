@@ -17,6 +17,13 @@
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         },
+                {
+            "name": "DebugWithOptions",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "STRIP_IMX335": "ON"
+            }
+        },
         {
             "name": "Release",
             "inherits": "default",
@@ -29,6 +36,10 @@
         {
             "name": "Debug",
             "configurePreset": "Debug"
+        },
+        {
+            "name": "DebugWithOptions",
+            "configurePreset": "DebugWithOptions"
         },
         {
             "name": "Release",
