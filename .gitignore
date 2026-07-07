@@ -1,0 +1,3 @@
+Projects/*/Applications/*/*/build
+Projects/*/Applications/*/*/*/build
+Projects/*/Applications/*/*/*/.cache
