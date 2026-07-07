@@ -24,7 +24,7 @@ set(ST_MULTICONTEXT BOOT_FLASH CACHE STRING "Type of multi-context")
 if((${BUILD_CONTEXT} MATCHES .*FSBL.*) OR (NOT DEFINED BUILD_CONTEXT))
     message("   Build context: " FSBL)
     ExternalProject_Add(VENC_SDCard_ThreadX_FSBL
-        BINARY_DIR                  ${CMAKE_BINARY_DIR}/FSBL
+        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/FSBL/build
         SOURCE_DIR                  ${PROJECT_SOURCE_DIR}/FSBL
         PREFIX                      FSBL
         CONFIGURE_HANDLED_BY_BUILD  true
@@ -32,14 +32,14 @@ if((${BUILD_CONTEXT} MATCHES .*FSBL.*) OR (NOT DEFINED BUILD_CONTEXT))
         CMAKE_ARGS                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         BUILD_ALWAYS                true
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_BINARY_DIR}/FSBL")
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/FSBL/build")
 endif()
 
 #-----------------------Build Appli Project-----------------------#
 if((${BUILD_CONTEXT} MATCHES .*Appli.*) OR (NOT DEFINED BUILD_CONTEXT))
     message("   Build context: " Appli)
     ExternalProject_Add(VENC_SDCard_ThreadX_Appli
-        BINARY_DIR                  ${CMAKE_BINARY_DIR}/Appli
+        BINARY_DIR                  ${CMAKE_SOURCE_DIR}/Appli/build
         SOURCE_DIR                  ${PROJECT_SOURCE_DIR}/Appli
         PREFIX                      Appli
         CONFIGURE_HANDLED_BY_BUILD  true
@@ -47,5 +47,5 @@ if((${BUILD_CONTEXT} MATCHES .*Appli.*) OR (NOT DEFINED BUILD_CONTEXT))
         CMAKE_ARGS                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}  -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         BUILD_ALWAYS                true
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_BINARY_DIR}/Appli")
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CMAKE_SOURCE_DIR}/Appli/build")
 endif()
