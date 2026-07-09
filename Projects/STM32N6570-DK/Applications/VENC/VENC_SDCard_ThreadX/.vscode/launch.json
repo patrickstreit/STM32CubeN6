@@ -4,21 +4,21 @@
         {
             // FSBL is loaded with full symbols; Appli symbols are added after the
             // FSBL hands over control in BOOT_Application (LRUN boot scheme).
-            "name": "STM32N6-DK / VENC / FSBL + APPLI",
+            "name": "STM32N6-DK / VENC / FSBL + APPLI / Debug",
             "cwd": "${workspaceFolder:VENC_SDCard_ThreadX}",
-            "executable": "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/VENC_SDCard_ThreadX_FSBL.elf",
+            "executable": "FSBL/build/Debug/VENC_SDCard_ThreadX_FSBL.elf",
             "request": "launch",
             "type": "cortex-debug",
             "servertype": "stlink",
             "showDevDebugOutput": "raw",
             "runToEntryPoint": "BOOT_Application",
-            "svdPath": "C:/Users/cross-INGPatrickStre/AppData/Local/stm32cube/packs/STMicroelectronics/stm32n6xx_dfp/1.2.0/SVD/STM32N657.svd",
+            "svdPath": "${env:STM32_SVD_PATH}/SVD/STM32N657.svd", //
             // "preLaunchTask": "Flash STM32N6 (DEVBOOT)",
             "serverArgs": [
                 "-m",
                 "1",
                 "-el",
-                "C:/Program Files/ST/STM32CubeProgrammer_2.20.0/bin/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr"
+                "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr"
             ],
             "overrideLaunchCommands": [
                 "-target-download",
@@ -27,7 +27,8 @@
             // GDB interprets backslashes as escapes, so this raw command needs a
             // forward-slash absolute path (${workspaceFolder} would expand to \\).
             "postLaunchCommands": [
-                "add-symbol-file C:/repositories/STM32CubeN6/Projects/STM32N6570-DK/Applications/VENC/VENC_SDCard_ThreadX/Appli/build/VENC_SDCard_ThreadX_Appli.elf"
+                "add-symbol-file Appli/build/Debug/VENC_SDCard_ThreadX_Appli.elf"
+
             ]
         }
     ]

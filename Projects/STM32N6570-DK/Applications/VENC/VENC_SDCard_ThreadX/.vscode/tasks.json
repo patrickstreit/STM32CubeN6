@@ -2,7 +2,7 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Flash STM32N6 VENC (DEVBOOT)",
+            "label": "Flash STM32N6 VENC (Debug)",
             "type": "shell",
             "command": "cube",
             "args": [
@@ -11,20 +11,20 @@
                 "port=SWD",
                 "mode=UR",
                 "-el",
-                "C:/Program Files/ST/STM32CubeProgrammer_2.20.0/bin/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
+                "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/build/FSBL/VENC_SDCard_ThreadX_FSBL-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/Debug/VENC_SDCard_ThreadX_FSBL-trusted.bin",
                 "0x70000000",
                 "-v",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/build/Appli/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/Debug/VENC_SDCard_ThreadX_Appli-trusted.bin",
                 "0x70100000",
                 "-v"
             ],
             "problemMatcher": []
         },
         {
-            "label": "Flash STM32N6 VENC (DEVBOOT) + Options",
+            "label": "Flash STM32N6 VENC (DebugWithOptions)",
             "type": "shell",
             "command": "cube",
             "args": [
@@ -33,13 +33,13 @@
                 "port=SWD",
                 "mode=UR",
                 "-el",
-                "C:/Program Files/ST/STM32CubeProgrammer_2.20.0/bin/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
+                "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/build/FSBL/VENC_SDCard_ThreadX_FSBL-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/DebugWithOptions/VENC_SDCard_ThreadX_FSBL-trusted.bin",
                 "0x70000000",
                 "-v",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/build/Appli/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/DebugWithOptions/VENC_SDCard_ThreadX_Appli-trusted.bin",
                 "0x70100000",
                 "-v"
             ],

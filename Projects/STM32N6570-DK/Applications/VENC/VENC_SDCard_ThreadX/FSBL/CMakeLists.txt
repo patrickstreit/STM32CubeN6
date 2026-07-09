@@ -141,17 +141,59 @@ add_custom_command(
     COMMENT "Generating .bin file"
 )
 
-# STM32 Signing Tool (hard-coded for STM32CubeProgrammer 2.20.0)
-set(SIGNING_TOOL "C:/Program Files/ST/STM32CubeProgrammer_2.20.0/bin/STM32_SigningTool_CLI.exe")
+# STM32 Signing Tool Environment Check: Programmer in Path and version check
+# From STM32CubeProgrammer >= 2.21.0 we have to add the "-align" parameter to the command, therefore we should check also the version of the signing tool and adapt the command accordingly.
+if(NOT DEFINED ENV{STM32_PRG_PATH})
+    message(FATAL_ERROR "Environment variable STM32_PRG_PATH is not set. Please set it to the STM32CubeProgrammer installation path.")
+endif()
+
+set(SIGNING_TOOL "$ENV{STM32_PRG_PATH}/STM32_SigningTool_CLI.exe")
 set(FSBL_INPUT  "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin")
 set(FSBL_OUTPUT "${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}-trusted.bin")
+
+execute_process(
+    COMMAND "${SIGNING_TOOL}" --version
+    OUTPUT_VARIABLE SIGNING_TOOL_VERSION_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+if (SIGNING_TOOL_VERSION_OUTPUT STREQUAL "")
+    message(FATAL_ERROR "Failed to get Signing Tool version. Please ensure STM32_SigningTool_CLI.exe is in the path specified by STM32_PRG_PATH.")
+endif()
+
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+"
+       SIGNING_TOOL_VERSION
+       "${SIGNING_TOOL_VERSION_OUTPUT}")
+
+message(STATUS "Signing Tool version: ${SIGNING_TOOL_VERSION}")
+
+If("${SIGNING_TOOL_VERSION}" VERSION_LESS "2.21.0")
+    set(SIGNING_ARGS
+        -bin ${FSBL_INPUT}
+        -nk
+        -of 0x80000000
+        -t fsbl
+        -o ${FSBL_OUTPUT}
+        -hv 2.3
+        -dump ${FSBL_OUTPUT}
+    )
+else()
+    set(SIGNING_ARGS
+        -bin ${FSBL_INPUT}
+        -nk
+        -of 0x80000000
+        -t fsbl
+        -o ${FSBL_OUTPUT}
+        -hv 2.3
+        -align # From STM32CubeProgrammer >= 2.21.0 we have to add the "-align" parameter
+        -dump ${FSBL_OUTPUT}
+    )
+endif()
 
 add_custom_command(
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo y > input.txt
-    # From STM32CubeProgrammer >= 2.21.0 add the "-align" parameter to the command below.
-    COMMAND "${SIGNING_TOOL}" -bin "${FSBL_INPUT}" -nk -of 0x80000000 -t fsbl -o "${FSBL_OUTPUT}" -hv 2.3 -dump "${FSBL_OUTPUT}" < input.txt
+    COMMAND ${SIGNING_TOOL} ${SIGNING_ARGS}
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Signing FSBL binary: ${FSBL_INPUT} -> ${FSBL_OUTPUT}"
 )
