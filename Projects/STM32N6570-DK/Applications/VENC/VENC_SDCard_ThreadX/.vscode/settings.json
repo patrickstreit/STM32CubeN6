@@ -11,5 +11,8 @@
         "starm-clangd",
         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc*",
         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-g++*"
-    ]
+    ],
+    "cortex-debug.armToolchainPath": "${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin",
+    "cortex-debug.stlinkPath": "${env:CUBE_BUNDLE_PATH}/stlink-gdbserver/7.13.0+st.3/bin/ST-LINK_gdbserver.exe",
+    "cortex-debug.stm32cubeprogrammer": "${env:CUBE_BUNDLE_PATH}/programmer/2.22.0+st.1/bin"
 }

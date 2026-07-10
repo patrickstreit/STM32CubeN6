@@ -44,6 +44,18 @@
                 "-v"
             ],
             "problemMatcher": []
+        },
+        {
+            "label": "Test VSCODE Variables",
+            "type": "shell",
+            "command": "echo",
+            "args": [
+                "workspaceFolder:VENC_SDCard_ThreadX | ${workspaceFolder:VENC_SDCard_ThreadX}",
+                "env:STM32_PRG_PATH:                 | ${env:STM32_PRG_PATH}",
+                "env:STM32_SVD_PATH:                 | ${env:STM32_SVD_PATH}",
+                "env:CUBE_BUNDLE_PATH:               | ${env:CUBE_BUNDLE_PATH}",
+            ],
+            "problemMatcher": []
         }
     ]
 }

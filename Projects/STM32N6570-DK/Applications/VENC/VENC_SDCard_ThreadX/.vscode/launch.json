@@ -12,7 +12,10 @@
             "servertype": "stlink",
             "showDevDebugOutput": "raw",
             "runToEntryPoint": "BOOT_Application",
-            "svdPath": "${env:STM32_SVD_PATH}/SVD/STM32N657.svd", //
+            // Set Environment variable STM32_SVD_PATH. Might be one of the following paths:
+            // C:\Program Files (x86)\STMicroelectronics\STM32CubeProgrammer\SVD
+            // C:\Users\%USERNAME%\AppData\Local\stm32cube\packs\STMicroelectronics\stm32n6xx_dfp\1.2.0\SVD
+            "svdPath": "${env:STM32_SVD_PATH}/STM32N657.svd", //
             // "preLaunchTask": "Flash STM32N6 (DEVBOOT)",
             "serverArgs": [
                 "-m",
