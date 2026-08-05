@@ -252,6 +252,7 @@ If("${SIGNING_TOOL_VERSION}" VERSION_LESS "2.21.0")
         -o ${APPLI_OUTPUT}
         -hv 2.3
         -dump ${APPLI_OUTPUT}
+        -s # silently overwrite existing output file
     )
 else()
     set(SIGNING_ARGS
@@ -263,6 +264,7 @@ else()
         -hv 2.3
         -align # From STM32CubeProgrammer >= 2.21.0 we have to add the "-align" parameter
         -dump ${APPLI_OUTPUT}
+        -s # silently overwrite existing output file
     )
 endif()
 
