@@ -92,6 +92,7 @@ set(APP_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Patch/stm32n6570_discovery_camera.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/syscalls.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sysmem.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/perf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/AZURE_RTOS/App/app_azure_rtos.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../FSBL/Src/system_stm32n6xx_fsbl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Startup/startup_stm32n657xx.s

@@ -24,6 +24,7 @@
 #include "utils.h"
 #include "app_filex.h"
 #include "h264encapi.h"
+#include "perf.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
@@ -50,6 +51,8 @@ void sdcard_thread_func(ULONG arg)
   ULONG record = 1;
   INT res;
   UINT open_new_file = 1;
+  uint64_t total_bytes = 0;
+  uint64_t file_start_cycles = 0;
   
   H264EncPictureCodingType frame_type = H264ENC_NOTCODED_FRAME;
   
@@ -58,6 +61,7 @@ void sdcard_thread_func(ULONG arg)
     printf("FileX init failed\n");
     return;
   }
+  perf_init();
   
   /* Wait for the first I frame*/
   do {
@@ -71,6 +75,13 @@ void sdcard_thread_func(ULONG arg)
   {
     if (open_new_file)
     {
+      /* If we are about to open a new file and this is not the first, report stats for the previous file */
+      if (filenumber)
+      {
+        uint32_t elapsed_ms = (uint32_t)(perf_delta_us64(file_start_cycles, perf_get_u64_cycles()) / 1000ULL);
+        perf_report_and_reset(nb_frames, total_bytes, elapsed_ms);
+        total_bytes = 0;
+      }
       if (filenumber)
       {
         if  (VENC_FileX_close() !=  FX_SUCCESS)
@@ -89,12 +100,18 @@ void sdcard_thread_func(ULONG arg)
       }
       filenumber++;
       nb_frames = 1;
+      /* mark file start (monotone 64-bit cycle count) */
+      file_start_cycles = perf_get_u64_cycles();
     }
     
     /* Write Frame to SDCard */
     if (data && size)
     {
+      uint64_t t0 = perf_get_u64_cycles();
       VENC_FileX_write((CHAR*)data, (LONG)size);
+      uint64_t t1 = perf_get_u64_cycles();
+      perf_add_sd_write((uint32_t)perf_delta_us64(t0, t1));
+      total_bytes += size;
       data = NULL; size = 0;
       BSP_LED_Toggle(LED_RED);
     }

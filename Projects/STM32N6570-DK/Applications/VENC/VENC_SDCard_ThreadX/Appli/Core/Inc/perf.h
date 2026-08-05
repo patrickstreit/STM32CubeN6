@@ -1,0 +1,37 @@
+/* perf.h - lightweight profiling helpers for VENC pipeline */
+#ifndef PERF_H
+#define PERF_H
+
+#include <stdint.h>
+
+typedef struct {
+  uint32_t count;
+  uint64_t total_us;
+  uint32_t min_us;
+  uint32_t max_us;
+} PerfStat_t;
+
+/* Init (safe to call multiple times) */
+void perf_init(void);
+
+/* time source */
+uint64_t perf_get_time_us(void);
+/* return raw 32-bit DWT cycle count */
+uint32_t perf_get_cycle_count(void);
+/* compute delta in microseconds between two 32-bit cycle counts (handles wrap) */
+uint32_t perf_delta_us(uint32_t start_cycles, uint32_t end_cycles);
+/* monotone 64-bit cycle counter and delta helpers */
+uint64_t perf_get_u64_cycles(void);
+uint64_t perf_delta_us64(uint64_t start_cycles, uint64_t end_cycles);
+
+/* add samples for named stages */
+void perf_add_encode(uint32_t us);
+void perf_add_h264(uint32_t us);
+void perf_add_queue_send(uint32_t us);
+void perf_add_queue_recv(uint32_t us);
+void perf_add_sd_write(uint32_t us);
+
+/* report summary (prints on stdout) and resets stats */
+void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms);
+
+#endif /* PERF_H */

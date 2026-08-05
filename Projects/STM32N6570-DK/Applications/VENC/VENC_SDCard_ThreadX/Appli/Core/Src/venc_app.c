@@ -25,6 +25,7 @@
 #include "imx335.h"
 #include "stm32n6xx_ll_venc.h"
 #include "stm32n6570_discovery.h"
+#include "perf.h"
 #include "stm32n6570_discovery_camera.h"
 #include "stm32n6570_discovery_lcd.h"
 #include "tx_api.h"
@@ -134,6 +135,9 @@ void venc_thread_func(ULONG arg)
   {
     Error_Handler();
   }
+
+  /* init perf */
+  perf_init();
 
   
   /* Get address and size reserved for h264 output bitstream */
@@ -337,6 +341,7 @@ static int encode_frame(void)
 {
   venc_output_frame_t frame_buffer = {0};
   int ret = H264ENC_FRAME_READY;
+  uint64_t t_start = perf_get_u64_cycles();
   if (!(frame_nb % hVencH264Instance.cfgH264Rate.gopLen))
   {
     /* if frame is the first : set as intra coded */
@@ -390,9 +395,12 @@ static int encode_frame(void)
   
 
   /* Encode Frame*/
+  uint64_t t_h264_0 = perf_get_u64_cycles();
   ret = H264EncStrmEncode(encoder, &encIn, &encOut, NULL, NULL, NULL);
+  uint64_t t_h264_1 = perf_get_u64_cycles();
+  perf_add_h264((uint32_t)perf_delta_us64(t_h264_0, t_h264_1));
 
-  /* Measure encode time*/
+  /* Measure encode time hook (user-defined) */
   timeMonitor();
 
   switch (ret)
@@ -411,6 +419,12 @@ static int encode_frame(void)
     {
       tx_block_release(frame_buffer.block_addr);
     }
+    else
+    {
+      uint64_t t_qsend_end = perf_get_u64_cycles();
+      /* approximate tx_queue_send as lightweight: record delta in us */
+      perf_add_queue_send((uint32_t)perf_delta_us64(t_h264_1, t_qsend_end));
+    }
     encIn.codingType = H264ENC_PREDICTED_FRAME;
      nb_encoded_frame++;
     break;
@@ -427,6 +441,8 @@ static int encode_frame(void)
     break;
   }
   frame_nb++;
+  uint64_t t_end = perf_get_u64_cycles();
+  perf_add_encode((uint32_t)perf_delta_us64(t_start, t_end));
   return 0;
 }
 
@@ -526,12 +542,15 @@ INT VENC_APP_GetData(UCHAR **data, ULONG *size)
     curr_block = NULL;
   }
   venc_output_frame_t frame_block;
+  uint64_t t_qrecv_0 = perf_get_u64_cycles();
   if(tx_queue_receive(&enc_frame_queue, (void *) &frame_block, TX_WAIT_FOREVER) != TX_SUCCESS)
   {
     *data = NULL;
     *size = 0;
     return(-1);
   }
+  uint64_t t_qrecv_1 = perf_get_u64_cycles();
+  perf_add_queue_recv((uint32_t)perf_delta_us64(t_qrecv_0, t_qrecv_1));
   *data = (UCHAR *) frame_block.aligned_block_addr;
   *size = frame_block.size;
   curr_block = frame_block.block_addr;
