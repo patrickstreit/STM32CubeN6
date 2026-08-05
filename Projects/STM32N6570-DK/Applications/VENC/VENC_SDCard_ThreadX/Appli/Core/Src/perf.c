@@ -11,6 +11,13 @@ static PerfStat_t s_qsend = {0};
 static PerfStat_t s_qrecv = {0};
 static PerfStat_t s_sd = {0};
 static uint64_t s_cpu_hz = 1;
+/* occupancy counters */
+static uint32_t s_blockpool_used = 0;
+static uint32_t s_blockpool_max = 0;
+static uint32_t s_blockpool_capacity = 0;
+static uint32_t s_queue_used = 0;
+static uint32_t s_queue_max = 0;
+static uint32_t s_queue_capacity = 0;
 
 static void perf_add_sample(PerfStat_t *s, uint32_t us)
 {
@@ -91,6 +98,56 @@ void perf_add_queue_send(uint32_t us) { perf_add_sample(&s_qsend, us); }
 void perf_add_queue_recv(uint32_t us) { perf_add_sample(&s_qrecv, us); }
 void perf_add_sd_write(uint32_t us)   { perf_add_sample(&s_sd, us); }
 
+void perf_set_queue_capacity(uint32_t capacity)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_queue_capacity = capacity;
+  if (!prim) __enable_irq();
+}
+
+void perf_set_blockpool_capacity(uint32_t capacity)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_blockpool_capacity = capacity;
+  if (!prim) __enable_irq();
+}
+
+void perf_inc_blockpool(void)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_blockpool_used++;
+  if (s_blockpool_used > s_blockpool_max) s_blockpool_max = s_blockpool_used;
+  if (!prim) __enable_irq();
+}
+
+void perf_dec_blockpool(void)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  if (s_blockpool_used) s_blockpool_used--;
+  if (!prim) __enable_irq();
+}
+
+void perf_inc_queue(void)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_queue_used++;
+  if (s_queue_used > s_queue_max) s_queue_max = s_queue_used;
+  if (!prim) __enable_irq();
+}
+
+void perf_dec_queue(void)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  if (s_queue_used) s_queue_used--;
+  if (!prim) __enable_irq();
+}
+
 static void perf_print_stat(const char *name, PerfStat_t *s)
 {
   if (s->count == 0)
@@ -125,10 +182,20 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   perf_print_stat("QueueRecv", &s_qrecv);
   perf_print_stat("SD_Write", &s_sd);
 
+  /* Print occupancy summary */
+  printf("%-20s %10s, %10s, %10s\n", "resource", "capacity", "max_used", "cur_used");
+  printf("%-20s %10lu, %10lu, %10lu\n", "BlockPool", (uint32_t)s_blockpool_capacity, (uint32_t)s_blockpool_max, (uint32_t)s_blockpool_used);
+  printf("%-20s %10lu, %10lu, %10lu\n", "Queue", (uint32_t)s_queue_capacity, (uint32_t)s_queue_max, (uint32_t)s_queue_used);
+
   /* reset */
   s_encode.count = s_encode.total_us = s_encode.min_us = s_encode.max_us = 0;
   s_h264.count = s_h264.total_us = s_h264.min_us = s_h264.max_us = 0;
   s_qsend.count = s_qsend.total_us = s_qsend.min_us = s_qsend.max_us = 0;
   s_qrecv.count = s_qrecv.total_us = s_qrecv.min_us = s_qrecv.max_us = 0;
   s_sd.count = s_sd.total_us = s_sd.min_us = s_sd.max_us = 0;
+  /* reset occupancy maxima and current usage */
+  s_blockpool_used = 0;
+  s_blockpool_max = 0;
+  s_queue_used = 0;
+  s_queue_max = 0;
 }

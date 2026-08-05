@@ -34,4 +34,12 @@ void perf_add_sd_write(uint32_t us);
 /* report summary (prints on stdout) and resets stats */
 void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms);
 
+/* Block-pool and queue occupancy instrumentation */
+void perf_set_queue_capacity(uint32_t capacity);
+void perf_set_blockpool_capacity(uint32_t capacity);
+void perf_inc_blockpool(void);
+void perf_dec_blockpool(void);
+void perf_inc_queue(void);
+void perf_dec_queue(void);
+
 #endif /* PERF_H */

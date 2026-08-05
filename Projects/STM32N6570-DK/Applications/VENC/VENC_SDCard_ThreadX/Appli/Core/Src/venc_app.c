@@ -136,6 +136,9 @@ void venc_thread_func(ULONG arg)
     Error_Handler();
   }
 
+  /* expose queue capacity to perf */
+  perf_set_queue_capacity(VENC_APP_QUEUE_SIZE);
+
   /* init perf */
   perf_init();
 
@@ -149,6 +152,9 @@ void venc_thread_func(ULONG arg)
   {
     Error_Handler();
   }
+
+  /* expose block-pool capacity to perf (number of blocks) */
+  perf_set_blockpool_capacity(outputBufferSize / outputBlockSize);
 
    /* Initialize camera */
   if(BSP_CAMERA_Init(0,CAMERA_R2592x1944, CAMERA_PF_RAW_RGGB10) != BSP_ERROR_NONE)
@@ -301,6 +307,7 @@ static int encoder_start(void)
   {
     return -1;
   }
+  perf_inc_blockpool();
   frame_buffer.aligned_block_addr = (uint32_t *) ALIGNED((uint32_t) frame_buffer.block_addr, 8);
   encIn.pOutBuf = frame_buffer.aligned_block_addr;
   encIn.busOutBuf = (uint32_t) encIn.pOutBuf;
@@ -315,6 +322,7 @@ static int encoder_start(void)
   frame_buffer.size = encOut.streamSize;
   
   tx_block_release(frame_buffer.block_addr);
+  perf_dec_blockpool();
 
   encIn.codingType = H264ENC_INTRA_FRAME;
   return 0;
@@ -386,6 +394,7 @@ static int encode_frame(void)
     printf("VENC : failed to allocate output buffer\n");
     return -1;
   }
+  perf_inc_blockpool();
 
   frame_buffer.aligned_block_addr = (uint32_t *) ALIGNED((uint32_t) frame_buffer.block_addr, 8);
 
@@ -418,12 +427,14 @@ static int encode_frame(void)
     if(tx_queue_send(&enc_frame_queue, (void *) &frame_buffer, TX_NO_WAIT) != TX_SUCCESS)
     {
       tx_block_release(frame_buffer.block_addr);
+      perf_dec_blockpool();
     }
     else
     {
       uint64_t t_qsend_end = perf_get_u64_cycles();
       /* approximate tx_queue_send as lightweight: record delta in us */
       perf_add_queue_send((uint32_t)perf_delta_us64(t_h264_1, t_qsend_end));
+      perf_inc_queue();
     }
     encIn.codingType = H264ENC_PREDICTED_FRAME;
      nb_encoded_frame++;
@@ -540,6 +551,7 @@ INT VENC_APP_GetData(UCHAR **data, ULONG *size)
   {
     tx_block_release(curr_block);
     curr_block = NULL;
+    perf_dec_blockpool();
   }
   venc_output_frame_t frame_block;
   uint64_t t_qrecv_0 = perf_get_u64_cycles();
@@ -551,6 +563,7 @@ INT VENC_APP_GetData(UCHAR **data, ULONG *size)
   }
   uint64_t t_qrecv_1 = perf_get_u64_cycles();
   perf_add_queue_recv((uint32_t)perf_delta_us64(t_qrecv_0, t_qrecv_1));
+  perf_dec_queue();
   *data = (UCHAR *) frame_block.aligned_block_addr;
   *size = frame_block.size;
   curr_block = frame_block.block_addr;
