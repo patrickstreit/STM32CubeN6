@@ -30,6 +30,10 @@ void perf_add_h264(uint32_t us);
 void perf_add_queue_send(uint32_t us);
 void perf_add_queue_recv(uint32_t us);
 void perf_add_sd_write(uint32_t us);
+void perf_add_file_close(uint32_t us);
+void perf_add_media_flush(uint32_t us);
+void perf_add_sd_ll_write_blocks(uint32_t blocks);
+void perf_add_sd_ll_dma(uint32_t us);
 
 /* report summary (prints on stdout) and resets stats */
 void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms);

@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "main.h"
+#include "perf.h"
 #include "stm32n6570_discovery.h"
 /* USER CODE END Includes */
 
@@ -248,8 +249,14 @@ UINT VENC_FileX_write(CHAR * data, LONG size)
 
 UINT VENC_FileX_close(void)
 {
+  uint64_t t0;
+  uint64_t t1;
+
   /* Close the test file.  */
+  t0 = perf_get_u64_cycles();
   UINT status =  fx_file_close(&fx_file);
+  t1 = perf_get_u64_cycles();
+  perf_add_file_close((uint32_t)perf_delta_us64(t0, t1));
   /* Check the file close status.  */
   if (status != FX_SUCCESS)
   {
@@ -257,7 +264,10 @@ UINT VENC_FileX_close(void)
     return status;
   }
 
+  t0 = perf_get_u64_cycles();
   status = fx_media_flush(&sdio_disk);
+  t1 = perf_get_u64_cycles();
+  perf_add_media_flush((uint32_t)perf_delta_us64(t0, t1));
   /* Check the media flush  status.  */
   if(status != FX_SUCCESS)
   {

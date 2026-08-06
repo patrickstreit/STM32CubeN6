@@ -11,11 +11,15 @@
 
 #include "fx_stm32_sd_driver.h"
 #include "main.h"
+#include "perf.h"
 
 TX_SEMAPHORE sd_tx_semaphore;
 TX_SEMAPHORE sd_rx_semaphore;
 
 SD_HandleTypeDef hsd1;
+
+static volatile uint64_t s_sd_wr_start_cycles = 0;
+static volatile uint8_t s_sd_wr_inflight = 0;
 
 
 /* USER CODE BEGIN 0 */
@@ -145,6 +149,9 @@ INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT
   INT ret = 0;
   /* USER CODE BEGIN PRE_WRITE_BLOCKS */
   UNUSED(instance);
+  perf_add_sd_ll_write_blocks(total_blocks);
+  s_sd_wr_start_cycles = perf_get_u64_cycles();
+  s_sd_wr_inflight = 1U;
   /* USER CODE END PRE_WRITE_BLOCKS */
 
   if(HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks) != HAL_OK)
@@ -166,7 +173,14 @@ INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT
 */
 void HAL_SD_TxCpltCallback(SD_HandleTypeDef *hsd)
 {
+  UNUSED(hsd);
   /* USER CODE BEGIN PRE_TX_CMPLT */
+  if (s_sd_wr_inflight)
+  {
+    uint64_t t_end = perf_get_u64_cycles();
+    perf_add_sd_ll_dma((uint32_t)perf_delta_us64(s_sd_wr_start_cycles, t_end));
+    s_sd_wr_inflight = 0U;
+  }
 
   /* USER CODE END PRE_TX_CMPLT */
 

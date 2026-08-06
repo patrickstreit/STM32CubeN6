@@ -10,7 +10,18 @@ static PerfStat_t s_h264 = {0};
 static PerfStat_t s_qsend = {0};
 static PerfStat_t s_qrecv = {0};
 static PerfStat_t s_sd = {0};
+static PerfStat_t s_sd_ll_dma = {0};
+static PerfStat_t s_file_close = {0};
+static PerfStat_t s_media_flush = {0};
 static uint64_t s_cpu_hz = 1;
+static uint32_t s_sd_ll_write_calls = 0;
+static uint64_t s_sd_ll_write_total_blocks = 0;
+static uint32_t s_sd_ll_write_max_blocks = 0;
+static uint32_t s_sd_ll_blk_1 = 0;
+static uint32_t s_sd_ll_blk_2_4 = 0;
+static uint32_t s_sd_ll_blk_5_16 = 0;
+static uint32_t s_sd_ll_blk_17_64 = 0;
+static uint32_t s_sd_ll_blk_65_plus = 0;
 /* occupancy counters */
 static uint32_t s_blockpool_used = 0;
 static uint32_t s_blockpool_max = 0;
@@ -97,6 +108,39 @@ void perf_add_h264(uint32_t us)   { perf_add_sample(&s_h264, us); }
 void perf_add_queue_send(uint32_t us) { perf_add_sample(&s_qsend, us); }
 void perf_add_queue_recv(uint32_t us) { perf_add_sample(&s_qrecv, us); }
 void perf_add_sd_write(uint32_t us)   { perf_add_sample(&s_sd, us); }
+void perf_add_sd_ll_dma(uint32_t us)  { perf_add_sample(&s_sd_ll_dma, us); }
+void perf_add_file_close(uint32_t us) { perf_add_sample(&s_file_close, us); }
+void perf_add_media_flush(uint32_t us) { perf_add_sample(&s_media_flush, us); }
+
+void perf_add_sd_ll_write_blocks(uint32_t blocks)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_sd_ll_write_calls++;
+  s_sd_ll_write_total_blocks += blocks;
+  if (blocks > s_sd_ll_write_max_blocks) s_sd_ll_write_max_blocks = blocks;
+  if (blocks <= 1U)
+  {
+    s_sd_ll_blk_1++;
+  }
+  else if (blocks <= 4U)
+  {
+    s_sd_ll_blk_2_4++;
+  }
+  else if (blocks <= 16U)
+  {
+    s_sd_ll_blk_5_16++;
+  }
+  else if (blocks <= 64U)
+  {
+    s_sd_ll_blk_17_64++;
+  }
+  else
+  {
+    s_sd_ll_blk_65_plus++;
+  }
+  if (!prim) __enable_irq();
+}
 
 void perf_set_queue_capacity(uint32_t capacity)
 {
@@ -181,6 +225,14 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   perf_print_stat("QueueSend", &s_qsend);
   perf_print_stat("QueueRecv", &s_qrecv);
   perf_print_stat("SD_Write", &s_sd);
+  perf_print_stat("SD_LLDMA", &s_sd_ll_dma);
+  perf_print_stat("FileClose", &s_file_close);
+  perf_print_stat("MediaFlush", &s_media_flush);
+
+  printf("%-20s %10s, %10s, %10s\n", "sd_ll_write", "calls", "total_blk", "max_blk");
+  printf("%-20s %10lu, %10lu, %10lu\n", "SD_WriteReq", s_sd_ll_write_calls, (uint32_t)s_sd_ll_write_total_blocks, s_sd_ll_write_max_blocks);
+  printf("%-20s %10s, %10s, %10s, %10s, %10s\n", "sd_ll_blk_bins", "1", "2_4", "5_16", "17_64", "65p");
+  printf("%-20s %10lu, %10lu, %10lu, %10lu, %10lu\n", "SD_WriteBins", s_sd_ll_blk_1, s_sd_ll_blk_2_4, s_sd_ll_blk_5_16, s_sd_ll_blk_17_64, s_sd_ll_blk_65_plus);
 
   /* Print occupancy summary */
   printf("%-20s %10s, %10s, %10s\n", "resource", "capacity", "max_used", "cur_used");
@@ -193,6 +245,17 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   s_qsend.count = s_qsend.total_us = s_qsend.min_us = s_qsend.max_us = 0;
   s_qrecv.count = s_qrecv.total_us = s_qrecv.min_us = s_qrecv.max_us = 0;
   s_sd.count = s_sd.total_us = s_sd.min_us = s_sd.max_us = 0;
+  s_sd_ll_dma.count = s_sd_ll_dma.total_us = s_sd_ll_dma.min_us = s_sd_ll_dma.max_us = 0;
+  s_file_close.count = s_file_close.total_us = s_file_close.min_us = s_file_close.max_us = 0;
+  s_media_flush.count = s_media_flush.total_us = s_media_flush.min_us = s_media_flush.max_us = 0;
+  s_sd_ll_write_calls = 0;
+  s_sd_ll_write_total_blocks = 0;
+  s_sd_ll_write_max_blocks = 0;
+  s_sd_ll_blk_1 = 0;
+  s_sd_ll_blk_2_4 = 0;
+  s_sd_ll_blk_5_16 = 0;
+  s_sd_ll_blk_17_64 = 0;
+  s_sd_ll_blk_65_plus = 0;
   /* reset occupancy maxima and current usage */
   s_blockpool_used = 0;
   s_blockpool_max = 0;
