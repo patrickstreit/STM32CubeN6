@@ -51,7 +51,7 @@ typedef struct {
 /* Private define ------------------------------------------------------------*/
 /* Align and use unsigned suffixes for sizes/counts */
 #define VENC_APP_QUEUE_SIZE        15U
-#define VENC_OUTPUT_BLOCK_NBR      4U
+#define VENC_OUTPUT_BLOCK_NBR      8U
 
 /* Private macro -------------------------------------------------------------*/
 /* Align a pointer up to 'bytes' boundary */

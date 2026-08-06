@@ -45,6 +45,8 @@
 #define SD_DETECT_Pin GPIO_PIN_12
 #define SD_DETECT_GPIO_Port GPION
 #define SD_DETECT_EXTI_IRQn EXTI12_IRQn
+#define FX_MEDIA_CACHE_SIZE (32U * 1024U)
+#define VENC_FILE_PREALLOC_BYTES (3U * 1024U * 1024U)
 
 /* Message content*/
 typedef enum {
@@ -66,7 +68,7 @@ CARD_STATUS_CONNECTED           = 77
 TX_THREAD       fx_app_thread;
 
 /* Buffer for FileX FX_MEDIA sector cache. */
-ALIGN_32BYTES (uint32_t fx_sd_media_memory[FX_STM32_SD_DEFAULT_SECTOR_SIZE / sizeof(uint32_t)]);
+ALIGN_32BYTES (uint32_t fx_sd_media_memory[FX_MEDIA_CACHE_SIZE / sizeof(uint32_t)]);
 /* Define FileX global data structures.  */
 FX_MEDIA        sdio_disk;
 
@@ -235,6 +237,17 @@ UINT VENC_FileX_Open(CHAR * filename)
     /* Error opening file, call error handler.  */
     return sd_status;
   }
+
+  /* Best-effort preallocation to reduce cluster growth during recording. */
+  if (fx_file_allocate(&fx_file, (ULONG)VENC_FILE_PREALLOC_BYTES) == FX_SUCCESS)
+  {
+    sd_status = fx_file_seek(&fx_file, 0U);
+    if (sd_status != FX_SUCCESS)
+    {
+      return sd_status;
+    }
+  }
+
   /* USER CODE END fx_app_thread_entry 1 */
   return 0;
 }

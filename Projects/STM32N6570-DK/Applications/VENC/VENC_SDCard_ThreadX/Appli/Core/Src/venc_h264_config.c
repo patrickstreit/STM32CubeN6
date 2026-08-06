@@ -79,7 +79,7 @@
 
 /* Size of output h264 bitstream - to be adjusted according to targeted bitrate*/
 #ifndef VENC_OUTPUT_BUFFER_SIZE
-#define VENC_OUTPUT_BUFFER_SIZE     (4U * 500U * 1024U)
+#define VENC_OUTPUT_BUFFER_SIZE     (5U * 500U * 1024U)
 #endif
 
 
