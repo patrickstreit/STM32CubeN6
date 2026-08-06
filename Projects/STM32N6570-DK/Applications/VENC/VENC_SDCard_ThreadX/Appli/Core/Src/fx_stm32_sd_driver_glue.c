@@ -12,6 +12,7 @@
 #include "fx_stm32_sd_driver.h"
 #include "main.h"
 #include "perf.h"
+#include "stdio.h"
 
 TX_SEMAPHORE sd_tx_semaphore;
 TX_SEMAPHORE sd_rx_semaphore;
@@ -43,11 +44,18 @@ INT fx_stm32_sd_init(UINT instance)
   hsd1.Instance = SDMMC2;
   hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
-  hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
+  hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
   hsd1.Init.ClockDiv = 0;
   if (HAL_SD_Init(&hsd1) != HAL_OK)
   {
+    printf("SD init failed err=0x%08lx\n", HAL_SD_GetError(&hsd1));
+    Error_Handler();
+  }
+
+  if (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) != HAL_OK)
+  {
+    printf("SD 4-bit config failed err=0x%08lx\n", HAL_SD_GetError(&hsd1));
     Error_Handler();
   }
 #endif
@@ -126,6 +134,7 @@ INT fx_stm32_sd_read_blocks(UINT instance, UINT *buffer, UINT start_block, UINT 
 
   if(HAL_SD_ReadBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks) != HAL_OK)
   {
+    printf("SD read DMA failed err=0x%08lx blk=%lu n=%lu\n", HAL_SD_GetError(&hsd1), (uint32_t)start_block, (uint32_t)total_blocks);
     ret = 1;
   }
 
@@ -156,6 +165,8 @@ INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT
 
   if(HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks) != HAL_OK)
   {
+    printf("SD write DMA failed err=0x%08lx blk=%lu n=%lu\n", HAL_SD_GetError(&hsd1), (uint32_t)start_block, (uint32_t)total_blocks);
+    s_sd_wr_inflight = 0U;
     ret = 1;
   }
 
