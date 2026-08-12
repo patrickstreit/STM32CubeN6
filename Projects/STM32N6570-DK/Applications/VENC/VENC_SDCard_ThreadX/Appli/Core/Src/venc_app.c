@@ -50,8 +50,8 @@ typedef struct {
 } venc_output_frame_t;
 /* Private define ------------------------------------------------------------*/
 /* Align and use unsigned suffixes for sizes/counts */
-#define VENC_APP_QUEUE_SIZE        15U
-#define VENC_OUTPUT_BLOCK_NBR      8U
+#define VENC_APP_QUEUE_SIZE        24U
+#define VENC_OUTPUT_BLOCK_NBR      24U
 
 /* Private macro -------------------------------------------------------------*/
 /* Align a pointer up to 'bytes' boundary */
@@ -193,6 +193,7 @@ void venc_thread_func(ULONG arg)
     tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG, TX_AND_CLEAR, &flags, TX_WAIT_FOREVER);
     if (IsVideoOverflow())
     {
+      perf_note_frame_skip();
       nbFrameSkip++;
       continue; 
     }
@@ -350,6 +351,8 @@ static int encode_frame(void)
   venc_output_frame_t frame_buffer = {0};
   int ret = H264ENC_FRAME_READY;
   uint64_t t_start = perf_get_u64_cycles();
+  uint64_t t_block_0;
+  uint64_t t_block_1;
   if (!(frame_nb % hVencH264Instance.cfgH264Rate.gopLen))
   {
     /* if frame is the first : set as intra coded */
@@ -389,11 +392,14 @@ static int encode_frame(void)
   mark_frame((void*)encIn.busLuma);
 
   /* allocate and set output buffer */
-  if(tx_block_allocate(&venc_block_pool, (void **) &frame_buffer.block_addr, TX_WAIT_FOREVER) != TX_SUCCESS)
+  t_block_0 = perf_get_u64_cycles();
+  if(tx_block_allocate(&venc_block_pool, (void **) &frame_buffer.block_addr, TX_NO_WAIT) != TX_SUCCESS)
   {
     printf("VENC : failed to allocate output buffer\n");
     return -1;
   }
+  t_block_1 = perf_get_u64_cycles();
+  perf_add_blockpool_wait((uint32_t)perf_delta_us64(t_block_0, t_block_1));
   perf_inc_blockpool();
 
   frame_buffer.aligned_block_addr = (uint32_t *) ALIGNED((uint32_t) frame_buffer.block_addr, 8);
@@ -418,14 +424,19 @@ static int encode_frame(void)
     /*save stream */
     if(encOut.streamSize == 0)
     {
+      perf_note_zero_size_frame();
       encIn.codingType = H264ENC_INTRA_FRAME;
       tx_block_release(frame_buffer.block_addr);
+      perf_dec_blockpool();
       return -1;
     }
+    perf_add_frame_size(encOut.streamSize, encIn.outBufSize, encIn.codingType == H264ENC_INTRA_FRAME);
+    perf_note_encoded_frame();
     frame_buffer.coding_type = (uint32_t)encIn.codingType;
     frame_buffer.size = encOut.streamSize;
     if(tx_queue_send(&enc_frame_queue, (void *) &frame_buffer, TX_NO_WAIT) != TX_SUCCESS)
     {
+      perf_note_queue_send_fail();
       tx_block_release(frame_buffer.block_addr);
       perf_dec_blockpool();
     }
@@ -440,13 +451,17 @@ static int encode_frame(void)
      nb_encoded_frame++;
     break;
   case H264ENC_FUSE_ERROR:
+    perf_note_fuse_error();
     printf("DCMIPP and VENC desync (frame#%ld), restart the video\n", frame_nb);
     tx_block_release(frame_buffer.block_addr);
+    perf_dec_blockpool();
     encoder_reset();
     break;
   default:
+    perf_note_encode_error();
     printf("error encoding frame %d\n", ret);
     tx_block_release(frame_buffer.block_addr);
+    perf_dec_blockpool();
     encIn.codingType = H264ENC_INTRA_FRAME;
     return -1;
     break;
@@ -494,6 +509,7 @@ void BSP_CAMERA_FrameEventCallback(uint32_t instance)
   /* signal new frame */
   nbLineEvent = 0;
   frame_received++;
+  perf_note_capture_frame();
   tx_event_flags_set(&venc_app_flags, FRAME_RECEIVED_FLAG, TX_OR);
 
   /* Signal DCMIPP for next frame address */

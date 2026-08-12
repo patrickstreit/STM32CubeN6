@@ -66,11 +66,14 @@ static UINT sdcard_flush_buffer(ULONG *buffered_size, UINT force_full_flush)
   UINT status;
   ULONG write_size;
   ULONG remain;
+  ULONG buffered_before;
 
   if (*buffered_size == 0U)
   {
     return FX_SUCCESS;
   }
+
+  buffered_before = *buffered_size;
 
   if (force_full_flush)
   {
@@ -98,6 +101,7 @@ static UINT sdcard_flush_buffer(ULONG *buffered_size, UINT force_full_flush)
   }
 
   *buffered_size = remain;
+  perf_add_sd_buffer_flush(buffered_before, write_size, remain, force_full_flush != 0U);
 
   return FX_SUCCESS;
 }
@@ -194,6 +198,7 @@ void sdcard_thread_func(ULONG arg)
 
           if (direct_size > 0U)
           {
+            perf_add_sd_direct_write(direct_size);
             if (sdcard_write_chunk(data, direct_size) != FX_SUCCESS)
             {
               printf("FileX failed to write large frame\n");
@@ -248,6 +253,7 @@ void sdcard_thread_func(ULONG arg)
       }
 
       total_bytes += size;
+      perf_note_written_frame();
       data = NULL; size = 0;
       BSP_LED_Toggle(LED_RED);
     }

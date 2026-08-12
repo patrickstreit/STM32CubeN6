@@ -13,6 +13,11 @@ static PerfStat_t s_sd = {0};
 static PerfStat_t s_sd_ll_dma = {0};
 static PerfStat_t s_file_close = {0};
 static PerfStat_t s_media_flush = {0};
+static PerfStat_t s_block_wait = {0};
+static PerfStat_t s_frame_bytes = {0};
+static PerfStat_t s_iframe_bytes = {0};
+static PerfStat_t s_pframe_bytes = {0};
+static PerfStat_t s_headroom_bytes = {0};
 static uint64_t s_cpu_hz = 1;
 static uint32_t s_sd_ll_write_calls = 0;
 static uint64_t s_sd_ll_write_total_blocks = 0;
@@ -22,6 +27,32 @@ static uint32_t s_sd_ll_blk_2_4 = 0;
 static uint32_t s_sd_ll_blk_5_16 = 0;
 static uint32_t s_sd_ll_blk_17_64 = 0;
 static uint32_t s_sd_ll_blk_65_plus = 0;
+static uint32_t s_frame_bin_16k = 0;
+static uint32_t s_frame_bin_32k = 0;
+static uint32_t s_frame_bin_64k = 0;
+static uint32_t s_frame_bin_128k = 0;
+static uint32_t s_frame_bin_256k = 0;
+static uint32_t s_frame_bin_256k_plus = 0;
+static uint32_t s_headroom_lt_5pct = 0;
+static uint32_t s_headroom_lt_10pct = 0;
+static uint32_t s_headroom_lt_20pct = 0;
+static uint32_t s_capture_frames = 0;
+static uint32_t s_encoded_frames = 0;
+static uint32_t s_written_frames = 0;
+static uint32_t s_frame_skip_overflow = 0;
+static uint32_t s_zero_size_frames = 0;
+static uint32_t s_fuse_errors = 0;
+static uint32_t s_encode_errors = 0;
+static uint32_t s_queue_send_fail = 0;
+static uint32_t s_sd_flush_count = 0;
+static uint32_t s_sd_flush_forced = 0;
+static uint32_t s_sd_flush_partial = 0;
+static uint64_t s_sd_flush_total_bytes = 0;
+static uint64_t s_sd_flush_remain_total = 0;
+static uint32_t s_sd_flush_max_write = 0;
+static uint32_t s_sd_direct_write_count = 0;
+static uint64_t s_sd_direct_write_bytes = 0;
+static uint32_t s_sd_direct_write_max = 0;
 /* occupancy counters */
 static uint32_t s_blockpool_used = 0;
 static uint32_t s_blockpool_max = 0;
@@ -111,6 +142,108 @@ void perf_add_sd_write(uint32_t us)   { perf_add_sample(&s_sd, us); }
 void perf_add_sd_ll_dma(uint32_t us)  { perf_add_sample(&s_sd_ll_dma, us); }
 void perf_add_file_close(uint32_t us) { perf_add_sample(&s_file_close, us); }
 void perf_add_media_flush(uint32_t us) { perf_add_sample(&s_media_flush, us); }
+void perf_add_blockpool_wait(uint32_t us) { perf_add_sample(&s_block_wait, us); }
+
+static void perf_inc_counter(uint32_t *counter)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  (*counter)++;
+  if (!prim) __enable_irq();
+}
+
+void perf_note_capture_frame(void)   { perf_inc_counter(&s_capture_frames); }
+void perf_note_encoded_frame(void)   { perf_inc_counter(&s_encoded_frames); }
+void perf_note_written_frame(void)   { perf_inc_counter(&s_written_frames); }
+void perf_note_frame_skip(void)      { perf_inc_counter(&s_frame_skip_overflow); }
+void perf_note_zero_size_frame(void) { perf_inc_counter(&s_zero_size_frames); }
+void perf_note_fuse_error(void)      { perf_inc_counter(&s_fuse_errors); }
+void perf_note_encode_error(void)    { perf_inc_counter(&s_encode_errors); }
+void perf_note_queue_send_fail(void) { perf_inc_counter(&s_queue_send_fail); }
+
+void perf_add_frame_size(uint32_t size, uint32_t capacity, bool is_intra)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+
+  if (size <= 16U * 1024U)
+  {
+    s_frame_bin_16k++;
+  }
+  else if (size <= 32U * 1024U)
+  {
+    s_frame_bin_32k++;
+  }
+  else if (size <= 64U * 1024U)
+  {
+    s_frame_bin_64k++;
+  }
+  else if (size <= 128U * 1024U)
+  {
+    s_frame_bin_128k++;
+  }
+  else if (size <= 256U * 1024U)
+  {
+    s_frame_bin_256k++;
+  }
+  else
+  {
+    s_frame_bin_256k_plus++;
+  }
+
+  if (capacity > 0U)
+  {
+    uint32_t headroom = (size < capacity) ? (capacity - size) : 0U;
+    if (headroom * 100U < capacity * 5U) s_headroom_lt_5pct++;
+    if (headroom * 100U < capacity * 10U) s_headroom_lt_10pct++;
+    if (headroom * 100U < capacity * 20U) s_headroom_lt_20pct++;
+    if (!prim) __enable_irq();
+    perf_add_sample(&s_headroom_bytes, headroom);
+    prim = __get_PRIMASK();
+    __disable_irq();
+  }
+
+  if (!prim) __enable_irq();
+  perf_add_sample(&s_frame_bytes, size);
+  if (is_intra)
+  {
+    perf_add_sample(&s_iframe_bytes, size);
+  }
+  else
+  {
+    perf_add_sample(&s_pframe_bytes, size);
+  }
+}
+
+void perf_add_sd_buffer_flush(uint32_t buffered_size, uint32_t write_size, uint32_t remain_size, bool forced)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  UNUSED(buffered_size);
+  s_sd_flush_count++;
+  if (forced)
+  {
+    s_sd_flush_forced++;
+  }
+  else
+  {
+    s_sd_flush_partial++;
+  }
+  s_sd_flush_total_bytes += write_size;
+  s_sd_flush_remain_total += remain_size;
+  if (write_size > s_sd_flush_max_write) s_sd_flush_max_write = write_size;
+  if (!prim) __enable_irq();
+}
+
+void perf_add_sd_direct_write(uint32_t size)
+{
+  uint32_t prim = __get_PRIMASK();
+  __disable_irq();
+  s_sd_direct_write_count++;
+  s_sd_direct_write_bytes += size;
+  if (size > s_sd_direct_write_max) s_sd_direct_write_max = size;
+  if (!prim) __enable_irq();
+}
 
 void perf_add_sd_ll_write_blocks(uint32_t blocks)
 {
@@ -228,11 +361,31 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   perf_print_stat("SD_LLDMA", &s_sd_ll_dma);
   perf_print_stat("FileClose", &s_file_close);
   perf_print_stat("MediaFlush", &s_media_flush);
+  perf_print_stat("BlockWait", &s_block_wait);
+  perf_print_stat("FrameBytes", &s_frame_bytes);
+  perf_print_stat("IFrameBytes", &s_iframe_bytes);
+  perf_print_stat("PFrameBytes", &s_pframe_bytes);
+  perf_print_stat("HeadroomB", &s_headroom_bytes);
 
   printf("%-20s %10s, %10s, %10s\n", "sd_ll_write", "calls", "total_blk", "max_blk");
   printf("%-20s %10lu, %10lu, %10lu\n", "SD_WriteReq", s_sd_ll_write_calls, (uint32_t)s_sd_ll_write_total_blocks, s_sd_ll_write_max_blocks);
   printf("%-20s %10s, %10s, %10s, %10s, %10s\n", "sd_ll_blk_bins", "1", "2_4", "5_16", "17_64", "65p");
   printf("%-20s %10lu, %10lu, %10lu, %10lu, %10lu\n", "SD_WriteBins", s_sd_ll_blk_1, s_sd_ll_blk_2_4, s_sd_ll_blk_5_16, s_sd_ll_blk_17_64, s_sd_ll_blk_65_plus);
+
+  printf("%-20s %10s, %10s, %10s, %10s, %10s, %10s\n", "frame_bins", "16k", "32k", "64k", "128k", "256k", "256k+");
+  printf("%-20s %10lu, %10lu, %10lu, %10lu, %10lu, %10lu\n", "FrameSizeBins", s_frame_bin_16k, s_frame_bin_32k, s_frame_bin_64k, s_frame_bin_128k, s_frame_bin_256k, s_frame_bin_256k_plus);
+  printf("%-20s %10s, %10s, %10s\n", "headroom", "lt5pct", "lt10pct", "lt20pct");
+  printf("%-20s %10lu, %10lu, %10lu\n", "HeadroomBins", s_headroom_lt_5pct, s_headroom_lt_10pct, s_headroom_lt_20pct);
+  printf("%-20s %10s, %10s, %10s\n", "frames", "captured", "encoded", "written");
+  printf("%-20s %10lu, %10lu, %10lu\n", "FrameCounts", s_capture_frames, s_encoded_frames, s_written_frames);
+  printf("%-20s %10s, %10s, %10s, %10s\n", "drops_errs", "skip", "zero", "fuse", "encerr");
+  printf("%-20s %10lu, %10lu, %10lu, %10lu\n", "DropCounts", s_frame_skip_overflow, s_zero_size_frames, s_fuse_errors, s_encode_errors);
+  printf("%-20s %10s\n", "queue_send_fail", "count");
+  printf("%-20s %10lu\n", "QueueSendFail", s_queue_send_fail);
+  printf("%-20s %10s, %10s, %10s, %10s, %10s\n", "sd_buffer", "flushes", "forced", "partial", "max_wr", "remain_sum");
+  printf("%-20s %10lu, %10lu, %10lu, %10lu, %10lu\n", "SDBufferFlush", s_sd_flush_count, s_sd_flush_forced, s_sd_flush_partial, s_sd_flush_max_write, (uint32_t)s_sd_flush_remain_total);
+  printf("%-20s %10s, %10s, %10s\n", "sd_direct", "count", "bytes", "max");
+  printf("%-20s %10lu, %10lu, %10lu\n", "SDDirectWrite", s_sd_direct_write_count, (uint32_t)s_sd_direct_write_bytes, s_sd_direct_write_max);
 
   /* Print occupancy summary */
   printf("%-20s %10s, %10s, %10s\n", "resource", "capacity", "max_used", "cur_used");
@@ -248,6 +401,11 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   s_sd_ll_dma.count = s_sd_ll_dma.total_us = s_sd_ll_dma.min_us = s_sd_ll_dma.max_us = 0;
   s_file_close.count = s_file_close.total_us = s_file_close.min_us = s_file_close.max_us = 0;
   s_media_flush.count = s_media_flush.total_us = s_media_flush.min_us = s_media_flush.max_us = 0;
+  s_block_wait.count = s_block_wait.total_us = s_block_wait.min_us = s_block_wait.max_us = 0;
+  s_frame_bytes.count = s_frame_bytes.total_us = s_frame_bytes.min_us = s_frame_bytes.max_us = 0;
+  s_iframe_bytes.count = s_iframe_bytes.total_us = s_iframe_bytes.min_us = s_iframe_bytes.max_us = 0;
+  s_pframe_bytes.count = s_pframe_bytes.total_us = s_pframe_bytes.min_us = s_pframe_bytes.max_us = 0;
+  s_headroom_bytes.count = s_headroom_bytes.total_us = s_headroom_bytes.min_us = s_headroom_bytes.max_us = 0;
   s_sd_ll_write_calls = 0;
   s_sd_ll_write_total_blocks = 0;
   s_sd_ll_write_max_blocks = 0;
@@ -256,6 +414,32 @@ void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms)
   s_sd_ll_blk_5_16 = 0;
   s_sd_ll_blk_17_64 = 0;
   s_sd_ll_blk_65_plus = 0;
+  s_frame_bin_16k = 0;
+  s_frame_bin_32k = 0;
+  s_frame_bin_64k = 0;
+  s_frame_bin_128k = 0;
+  s_frame_bin_256k = 0;
+  s_frame_bin_256k_plus = 0;
+  s_headroom_lt_5pct = 0;
+  s_headroom_lt_10pct = 0;
+  s_headroom_lt_20pct = 0;
+  s_capture_frames = 0;
+  s_encoded_frames = 0;
+  s_written_frames = 0;
+  s_frame_skip_overflow = 0;
+  s_zero_size_frames = 0;
+  s_fuse_errors = 0;
+  s_encode_errors = 0;
+  s_queue_send_fail = 0;
+  s_sd_flush_count = 0;
+  s_sd_flush_forced = 0;
+  s_sd_flush_partial = 0;
+  s_sd_flush_total_bytes = 0;
+  s_sd_flush_remain_total = 0;
+  s_sd_flush_max_write = 0;
+  s_sd_direct_write_count = 0;
+  s_sd_direct_write_bytes = 0;
+  s_sd_direct_write_max = 0;
   /* reset occupancy maxima and current usage */
   s_blockpool_used = 0;
   s_blockpool_max = 0;

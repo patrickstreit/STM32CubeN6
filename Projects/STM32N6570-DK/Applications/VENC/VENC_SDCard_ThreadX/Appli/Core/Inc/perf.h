@@ -2,6 +2,7 @@
 #ifndef PERF_H
 #define PERF_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
@@ -34,6 +35,20 @@ void perf_add_file_close(uint32_t us);
 void perf_add_media_flush(uint32_t us);
 void perf_add_sd_ll_write_blocks(uint32_t blocks);
 void perf_add_sd_ll_dma(uint32_t us);
+void perf_add_blockpool_wait(uint32_t us);
+void perf_add_frame_size(uint32_t size, uint32_t capacity, bool is_intra);
+void perf_add_sd_buffer_flush(uint32_t buffered_size, uint32_t write_size, uint32_t remain_size, bool forced);
+void perf_add_sd_direct_write(uint32_t size);
+
+/* event counters */
+void perf_note_capture_frame(void);
+void perf_note_encoded_frame(void);
+void perf_note_written_frame(void);
+void perf_note_frame_skip(void);
+void perf_note_zero_size_frame(void);
+void perf_note_fuse_error(void);
+void perf_note_encode_error(void);
+void perf_note_queue_send_fail(void);
 
 /* report summary (prints on stdout) and resets stats */
 void perf_report_and_reset(uint32_t frames, uint64_t bytes, uint32_t elapsed_ms);
