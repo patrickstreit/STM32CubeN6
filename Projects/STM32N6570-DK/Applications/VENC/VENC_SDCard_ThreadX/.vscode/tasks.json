@@ -1,0 +1,61 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Flash STM32N6 VENC (Debug)",
+            "type": "shell",
+            "command": "cube",
+            "args": [
+                "programmer",
+                "-c",
+                "port=SWD",
+                "mode=UR",
+                "-el",
+                "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
+                "-d",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/Debug/VENC_SDCard_ThreadX_FSBL-trusted.bin",
+                "0x70000000",
+                "-v",
+                "-d",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/Debug/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "0x70100000",
+                "-v"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash STM32N6 VENC (DebugWithOptions)",
+            "type": "shell",
+            "command": "cube",
+            "args": [
+                "programmer",
+                "-c",
+                "port=SWD",
+                "mode=UR",
+                "-el",
+                "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
+                "-d",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/DebugWithOptions/VENC_SDCard_ThreadX_FSBL-trusted.bin",
+                "0x70000000",
+                "-v",
+                "-d",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/DebugWithOptions/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "0x70100000",
+                "-v"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Test VSCODE Variables",
+            "type": "shell",
+            "command": "echo",
+            "args": [
+                "workspaceFolder:VENC_SDCard_ThreadX | ${workspaceFolder:VENC_SDCard_ThreadX}",
+                "env:STM32_PRG_PATH:                 | ${env:STM32_PRG_PATH}",
+                "env:STM32_SVD_PATH:                 | ${env:STM32_SVD_PATH}",
+                "env:CUBE_BUNDLE_PATH:               | ${env:CUBE_BUNDLE_PATH}",
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
