@@ -32,6 +32,15 @@
 #if defined ( __ICCARM__ )
 #pragma data_alignment=4
 #endif
+
+#if defined (TX_ENABLE_EVENT_TRACE)
+#define TRACEX_BUFFER_SIZE  (3 * 1024 * 1024U)
+#define TRACEX_OBJECT_COUNT 32U
+
+__attribute__((section(".psram_bss"), aligned(32)))
+UCHAR tracex_buffer[TRACEX_BUFFER_SIZE];
+#endif
+
 __ALIGN_BEGIN static UCHAR tx_byte_pool_buffer[TX_APP_MEM_POOL_SIZE] __ALIGN_END;
 TX_BYTE_POOL tx_app_byte_pool;
 
@@ -65,6 +74,16 @@ VOID tx_application_define(VOID *first_unused_memory)
 {
   UINT status = TX_SUCCESS;
   
+  #if defined (TX_ENABLE_EVENT_TRACE)
+  /* Initialize & enable the TraceX system.  */
+  if (tx_trace_enable(tracex_buffer,
+                    sizeof(tracex_buffer),
+                    TRACEX_OBJECT_COUNT) != TX_SUCCESS)
+  {
+      Error_Handler();
+  }
+  #endif
+
   if (tx_byte_pool_create(&tx_app_byte_pool, "Tx App memory pool", tx_byte_pool_buffer, TX_APP_MEM_POOL_SIZE) != TX_SUCCESS)
   {
     Error_Handler();

@@ -30,6 +30,7 @@
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
 #define NB_FRAMES_PER_FILE (30U*10U) /* 10sec  @ 30 fps*/
+#define TRACE_EVENT_TEST (TX_TRACE_USER_EVENT_START + 0)
 /* Private variables ---------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 
@@ -88,6 +89,13 @@ void sdcard_thread_func(ULONG arg)
         printf("FileX failed to open %s\n", filename);
         return;
       }
+      tx_trace_user_event_insert(
+      TRACE_EVENT_TEST,
+      filenumber,
+      0x2222,
+      0x3333,
+      0x4444
+      );
       filenumber++;
       nb_frames = 1;
     }
