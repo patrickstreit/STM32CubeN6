@@ -9,7 +9,7 @@
 #include <stdint.h>
 
 #define INSTR_SCHEMA_VERSION  1U
-#define INSTR_SCHEMA_HASH     0x51DD3829U
+#define INSTR_SCHEMA_HASH     0x53E85D8BU
 
 typedef enum
 {
@@ -21,7 +21,7 @@ typedef enum
     INSTR_ID_FRAME_WRITE_BEGIN = 0x1201, /* frame_id, bytes, file_number, file_frames */
     INSTR_ID_FRAME_WRITTEN     = 0x1202, /* frame_id, bytes, status, file_number */
     INSTR_ID_FILE_ROTATED      = 0x1203, /* file_number, prev_file_frames, reserved0, reserved1 */
-    INSTR_ID_SD_WRITE_BLOCKS   = 0x1204, /* start_block, block_count, hal_status, reserved */
+    INSTR_ID_SD_WRITE_BLOCKS   = 0x1204, /* start_block, block_count, hal_status, buffer_addr */
     INSTR_ID_SD_WRITE_CPLT     = 0x1205, /* start_block, block_count, hal_status, reserved */
     INSTR_ID_SD_STATUS_WAIT    = 0x1206, /* status, reserved0, reserved1, reserved2 */
     INSTR_ID_SCHEMA_INFO       = 0x1FFF, /* schema_version, schema_hash, cpu_hz, ticks_per_sec */

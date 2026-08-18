@@ -126,7 +126,7 @@ events:
       - { name: start_block, type: u32 }
       - { name: block_count, type: u32 }
       - { name: hal_status,  type: i32, description: "0 == HAL_OK" }
-      - { name: reserved,    type: u32 }
+      - { name: buffer_addr, type: u32, description: "DMA source address; if not 4-byte aligned the FileX SD driver falls back to one HAL call per sector" }
 
   SD_WRITE_CPLT:
     id: 0x1205

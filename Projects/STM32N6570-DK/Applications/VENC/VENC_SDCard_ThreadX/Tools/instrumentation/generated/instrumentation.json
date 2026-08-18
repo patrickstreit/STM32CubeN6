@@ -281,9 +281,9 @@
           "unit": null
         },
         {
-          "description": null,
+          "description": "DMA source address; if not 4-byte aligned the FileX SD driver falls back to one HAL call per sector",
           "enum": null,
-          "name": "reserved",
+          "name": "buffer_addr",
           "type": "u32",
           "unit": null
         }
@@ -528,7 +528,7 @@
       "unit": "us"
     }
   },
-  "schema_hash": 1373452329,
+  "schema_hash": 1407737227,
   "schema_version": 1,
   "slices": {
     "DMA_WRITE": {

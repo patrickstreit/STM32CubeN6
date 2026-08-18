@@ -166,7 +166,7 @@ INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT
               start_block,
               total_blocks,
               (ULONG)(status),
-              0);
+              (ULONG)(uintptr_t)buffer);
 
   if(status != HAL_OK)
   {

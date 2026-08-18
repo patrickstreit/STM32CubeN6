@@ -290,3 +290,236 @@ SELECT
 FROM block_counts
 GROUP BY bucket_start, bucket_width
 ORDER BY bucket_start;
+
+
+-- ===========================================================================
+-- BASELINE (Plan-Phase 0.1) — vor jeder Aenderung einmal ausfuehren und die
+-- Ergebnisse festhalten. Nach Phase 1/2 identisch wiederholen und vergleichen.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- B1. Kernzahl: Anteil Einzelblock-Transfers nach ANZAHL und nach BYTES.
+--     Erwartung heute ~98 % der Transfers, aber nur wenige % der Bytes.
+-- ---------------------------------------------------------------------------
+WITH dma AS (
+  SELECT s.id, s.dur, a.int_value AS blocks
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA' AND a.key = 'debug.block_count'
+)
+SELECT
+  COUNT(*)                                                          AS transfers,
+  SUM(blocks)                                                       AS blocks_total,
+  SUM(CASE WHEN blocks = 1 THEN 1 ELSE 0 END)                       AS single_transfers,
+  ROUND(100.0 * SUM(CASE WHEN blocks = 1 THEN 1 ELSE 0 END) / COUNT(*), 2)      AS single_pct_by_count,
+  ROUND(100.0 * SUM(CASE WHEN blocks = 1 THEN 1 ELSE 0 END) / SUM(blocks), 2)   AS single_pct_by_blocks,
+  ROUND(AVG(blocks), 2)                                             AS avg_blocks,
+  MAX(blocks)                                                       AS max_blocks,
+  ROUND(SUM(dur) / 1e6, 1)                                          AS dma_busy_ms,
+  ROUND(100.0 * SUM(CASE WHEN blocks = 1 THEN dur ELSE 0 END) / SUM(dur), 2)    AS single_pct_of_dma_time
+FROM dma;
+
+
+-- ---------------------------------------------------------------------------
+-- B2. Fixkosten pro Transfer vs. Kosten pro Block.
+--     us_per_block bei blocks=1 gegen blocks>=64 vergleichen: der Quotient ist
+--     der Wirkungsgrad, den Phase 1/2 heben soll.
+-- ---------------------------------------------------------------------------
+WITH dma AS (
+  SELECT s.dur, a.int_value AS blocks
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA' AND a.key = 'debug.block_count'
+)
+SELECT
+  CASE
+    WHEN blocks = 1              THEN '  1'
+    WHEN blocks <= 8             THEN '  2-8'
+    WHEN blocks <= 32            THEN '  9-32'
+    WHEN blocks <= 64            THEN ' 33-64'
+    WHEN blocks <= 128           THEN ' 65-128'
+    ELSE                              '>128'
+  END                                   AS blocks_bucket,
+  COUNT(*)                              AS n,
+  SUM(blocks)                           AS blocks_total,
+  ROUND(AVG(dur) / 1e3, 1)              AS avg_us,
+  ROUND(MAX(dur) / 1e3, 1)              AS max_us,
+  ROUND(AVG(dur) / 1e3 / AVG(blocks), 2) AS us_per_block
+FROM dma
+GROUP BY blocks_bucket
+ORDER BY MIN(blocks);
+
+
+-- ---------------------------------------------------------------------------
+-- B3. Wie viele DMA-Transfers kostet ein Frame?
+--     Zeigt das erwartete Muster Kopf-Teilsektor / Mitte / Schwanz-Teilsektor
+--     plus FAT-Verkehr. Ziel nach Phase 1/2: deutlich weniger Transfers/Frame.
+-- ---------------------------------------------------------------------------
+WITH fw AS (
+  SELECT
+    s.id,
+    s.ts,
+    s.dur,
+    MAX(CASE WHEN a.key = 'debug.frame_id' THEN a.int_value END) AS frame_id,
+    MAX(CASE WHEN a.key = 'debug.bytes'    THEN a.int_value END) AS bytes
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'fx_file_write'
+  GROUP BY s.id
+),
+dma AS (
+  SELECT s.ts, s.dur, a.int_value AS blocks
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA' AND a.key = 'debug.block_count'
+)
+SELECT
+  fw.frame_id,
+  fw.bytes,
+  ROUND(fw.bytes / 512.0, 1)                                        AS sectors_of_payload,
+  COUNT(dma.ts)                                                     AS dma_transfers,
+  SUM(CASE WHEN dma.blocks = 1 THEN 1 ELSE 0 END)                   AS single_transfers,
+  SUM(dma.blocks)                                                   AS blocks_written,
+  ROUND(fw.dur / 1e6, 2)                                            AS fx_write_ms,
+  ROUND(SUM(dma.dur) / 1e6, 2)                                      AS dma_busy_ms
+FROM fw
+LEFT JOIN dma ON dma.ts >= fw.ts AND dma.ts < fw.ts + fw.dur
+GROUP BY fw.id
+ORDER BY fw.ts;
+
+
+-- ---------------------------------------------------------------------------
+-- B4. Aggregat von B3 — die eine Zeile, die man nach jeder Phase vergleicht.
+-- ---------------------------------------------------------------------------
+WITH fw AS (
+  SELECT s.id, s.ts, s.dur,
+         MAX(CASE WHEN a.key = 'debug.bytes' THEN a.int_value END) AS bytes
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'fx_file_write'
+  GROUP BY s.id
+),
+dma AS (
+  SELECT s.ts, a.int_value AS blocks
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA' AND a.key = 'debug.block_count'
+),
+per_frame AS (
+  SELECT
+    fw.id,
+    fw.bytes,
+    fw.dur,
+    COUNT(dma.ts)                                   AS transfers,
+    SUM(CASE WHEN dma.blocks = 1 THEN 1 ELSE 0 END) AS singles,
+    SUM(dma.blocks)                                 AS blocks
+  FROM fw
+  LEFT JOIN dma ON dma.ts >= fw.ts AND dma.ts < fw.ts + fw.dur
+  GROUP BY fw.id
+)
+SELECT
+  COUNT(*)                            AS frames,
+  ROUND(AVG(bytes))                   AS avg_frame_bytes,
+  ROUND(AVG(transfers), 2)            AS avg_transfers_per_frame,
+  ROUND(AVG(singles), 2)              AS avg_single_transfers_per_frame,
+  ROUND(AVG(blocks), 2)               AS avg_blocks_per_frame,
+  ROUND(AVG(dur) / 1e6, 2)            AS avg_fx_write_ms,
+  ROUND(MAX(dur) / 1e6, 2)            AS max_fx_write_ms
+FROM per_frame;
+
+
+-- ---------------------------------------------------------------------------
+-- B5. Blockadressen-Muster: sind die Einzelblocks Nutzdaten (nahe am letzten
+--     Multiblock-Transfer) oder FAT/Directory (weit entfernt, wiederkehrend)?
+--     Grosse Abstaende in delta_blocks == Metadaten-Verkehr.
+-- ---------------------------------------------------------------------------
+WITH dma AS (
+  SELECT
+    s.ts,
+    MAX(CASE WHEN a.key = 'debug.start_block' THEN a.int_value END) AS start_block,
+    MAX(CASE WHEN a.key = 'debug.block_count' THEN a.int_value END) AS blocks
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA'
+  GROUP BY s.id
+),
+seq AS (
+  SELECT
+    ts,
+    start_block,
+    blocks,
+    LAG(start_block) OVER (ORDER BY ts) AS prev_start,
+    LAG(blocks)      OVER (ORDER BY ts) AS prev_blocks
+  FROM dma
+)
+SELECT
+  ts,
+  start_block,
+  blocks,
+  start_block - (prev_start + prev_blocks) AS gap_blocks_to_prev_end
+FROM seq
+WHERE prev_start IS NOT NULL
+ORDER BY ts
+LIMIT 200;
+
+
+-- ---------------------------------------------------------------------------
+-- B6. ACHTUNG: nicht aussagekraeftig. buffer_addr ist die Adresse, die an die
+--     HAL geht — im Fallback-Pfad also der treiberinterne 'scratch', der immer
+--     ausgerichtet ist. align_mod4 ist daher immer 0. Nimm B7.
+-- ---------------------------------------------------------------------------
+WITH dma AS (
+  SELECT
+    MAX(CASE WHEN a.key = 'debug.block_count' THEN a.int_value END) AS blocks,
+    MAX(CASE WHEN a.key = 'debug.buffer_addr' THEN a.int_value END) AS buffer_addr
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA'
+  GROUP BY s.id
+)
+SELECT
+  buffer_addr % 4                                            AS align_mod4,
+  COUNT(*)                                                   AS transfers,
+  SUM(CASE WHEN blocks = 1 THEN 1 ELSE 0 END)                AS single_transfers,
+  SUM(CASE WHEN blocks > 1 THEN 1 ELSE 0 END)                AS multi_transfers,
+  ROUND(AVG(blocks), 2)                                      AS avg_blocks,
+  MAX(blocks)                                                AS max_blocks
+FROM dma
+GROUP BY align_mod4
+ORDER BY align_mod4;
+
+
+-- ---------------------------------------------------------------------------
+-- B7. Der eigentliche Beweis (Plan-Phase 0.2): Transfers nach Quelladresse.
+--     Drei Gruppen, aufloesbar ueber die .map-Datei:
+--       'scratch' (fx_stm32_sd_driver.c)  -> Per-Sektor-Fallback bei einem
+--                                            nicht wortausgerichteten
+--                                            FileX-Puffer
+--       'fx_sd_media_memory' (app_filex.c) -> Teilsektor-RMW und FAT ueber den
+--                                            Sektor-Cache
+--       verstreute Adressen                -> Direktschreiben aus dem
+--                                            Encoder-Puffer, die einzigen
+--                                            echten Multiblock-Transfers
+-- ---------------------------------------------------------------------------
+WITH dma AS (
+  SELECT
+    s.ts,
+    s.dur,
+    MAX(CASE WHEN a.key = 'debug.block_count' THEN a.int_value END) AS blocks,
+    MAX(CASE WHEN a.key = 'debug.buffer_addr' THEN a.int_value END) AS buffer_addr
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA'
+  GROUP BY s.id
+)
+SELECT
+  printf('0x%08X', buffer_addr) AS buffer_hex,
+  buffer_addr % 4               AS align_mod4,
+  buffer_addr % 32              AS align_mod32,
+  COUNT(*)                      AS transfers,
+  ROUND(AVG(blocks), 2)         AS avg_blocks,
+  ROUND(AVG(dur) / 1e3, 1)      AS avg_us
+FROM dma
+GROUP BY buffer_addr
+ORDER BY transfers DESC
+LIMIT 40;
