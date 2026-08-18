@@ -200,6 +200,10 @@ def main() -> int:
         all(a.ts_cycles <= b.ts_cycles for a, b in zip(trace.events, trace.events[1:])),
         "unwrapped timestamps are not monotonic",
     )
+    check(
+        any(k.endswith("_ptr_name") for e in trace.events for k in e.args),
+        "native event object names missing",
+    )
     check("VENC App Thread" in trace.threads.values(), "thread registry not resolved")
     check(results.counts.get("FRAME_CAPTURED", 0) > 0, "no FRAME_CAPTURED events")
 

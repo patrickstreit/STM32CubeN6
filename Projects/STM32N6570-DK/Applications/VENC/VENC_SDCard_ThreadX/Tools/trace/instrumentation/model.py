@@ -67,6 +67,7 @@ def normalize(dump: TraceXDump, schema: Schema, cpu_hz: int | None = None) -> No
     schema_ok = fw_hash is None or (fw_hash == schema.hash and fw_version == schema.version)
 
     threads = _thread_names(dump)
+    objects = _object_names(dump)
     current_thread = 0
     normalized: list[NormalizedEvent] = []
 
@@ -93,6 +94,13 @@ def normalize(dump: TraceXDump, schema: Schema, cpu_hz: int | None = None) -> No
                 name, labels = native
                 source = "filex" if 200 <= raw.event_id < 300 else "threadx"
                 args = {label: value for label, value in zip(labels, raw.info) if label}
+                for label, value in zip(labels, raw.info):
+                    if not label:
+                        continue
+                    if label.endswith("_ptr"):
+                        ptr_name = objects.get(value)
+                        if ptr_name is not None:
+                            args[f"{label}_name"] = ptr_name
             else:
                 name = f"EVENT_{raw.event_id}"
                 source = "unknown"
@@ -133,6 +141,15 @@ def _thread_names(dump: TraceXDump) -> dict[int, str]:
             continue
         if obj.type_name == "thread":
             names[obj.thread_pointer] = obj.name or f"thread@0x{obj.thread_pointer:08X}"
+    return names
+
+
+def _object_names(dump: TraceXDump) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for obj in dump.objects:
+        if obj.available or not obj.thread_pointer:
+            continue
+        names[obj.thread_pointer] = obj.name or f"{obj.type_name}@0x{obj.thread_pointer:08X}"
     return names
 
 
