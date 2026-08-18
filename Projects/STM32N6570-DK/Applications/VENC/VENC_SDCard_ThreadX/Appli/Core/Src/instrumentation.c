@@ -32,7 +32,8 @@
  *   EVENT_FLAGS              venc_app_flags fires twice per frame and carries
  *                            no information that FRAME_CAPTURED does not.
  *   INTERRUPT_CONTROL        very high rate, no analytical value here.
- *   MUTEX / SEMAPHORE        not used by this application's data path.
+ *   MUTEX                    not used by this application's data path.
+ *   SEMAPHORE                enabled for write-stall analysis (sd_tx_semaphore).
  *   TIME / TIMER             tick bookkeeping only.
  *   FX_TRACE_INTERNAL        per-sector driver read/write; would dominate the
  *                            ring buffer. Re-enable deliberately when
@@ -45,7 +46,6 @@
                                  | TX_TRACE_EVENT_FLAGS_EVENTS       \
                                  | TX_TRACE_INTERRUPT_CONTROL_EVENT  \
                                  | TX_TRACE_MUTEX_EVENTS             \
-                                 | TX_TRACE_SEMAPHORE_EVENTS         \
                                  | TX_TRACE_TIME_EVENTS              \
                                  | TX_TRACE_TIMER_EVENTS             \
                                  | FX_TRACE_INTERNAL_EVENTS          \

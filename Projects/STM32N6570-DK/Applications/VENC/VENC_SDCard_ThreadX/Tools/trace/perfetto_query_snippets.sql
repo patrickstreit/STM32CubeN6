@@ -172,6 +172,45 @@ GROUP BY s.id
 ORDER BY s.ts;
 
 
+WITH sem AS (
+  SELECT
+    s.id as id,
+    s.ts,
+    s.name,
+    MAX(CASE WHEN a.key = 'debug.semaphore_ptr' THEN a.int_value END) AS sem_ptr,
+    MAX(CASE WHEN a.key = 'debug.semaphore_ptr_name' THEN a.string_value END) AS sem_name,
+    MAX(CASE WHEN a.key = 'debug.current_count' THEN a.int_value END) AS sem_count,
+    MAX(CASE WHEN a.key = 'debug.wait_option'   THEN a.int_value END) AS wait_option
+  FROM slice s
+  LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name IN ('TX_SEMAPHORE_GET', 'TX_SEMAPHORE_PUT')
+  GROUP BY s.id
+),
+paired AS (
+  SELECT
+    id,
+    sem_ptr,
+    sem_name,
+    LAG(ts) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_ts,
+    ts AS cur_ts,
+    LAG(name) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_name,
+    name AS cur_name
+  FROM sem
+)
+SELECT
+  id,
+  sem_ptr,
+  sem_name,
+  prev_name,
+  cur_name,
+  (cur_ts - prev_ts) AS delta_ns,
+  (cur_ts - prev_ts) / 1e6 AS delta_ms,
+  prev_ts,
+  cur_ts
+FROM paired
+WHERE prev_ts IS NOT NULL
+ORDER BY delta_ms DESC;
+
 -- ---------------------------------------------------------------------------
 -- 11. Event mix — which producer dominates the ring (filter tuning)
 -- ---------------------------------------------------------------------------
