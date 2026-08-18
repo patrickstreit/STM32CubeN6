@@ -1,0 +1,253 @@
+# -----------------------------------------------------------------------------
+# Single source of truth for application instrumentation.
+#
+# Consumed by Tools/instrumentation/gen_instrumentation.py which generates:
+#   Appli/Core/Inc/generated/instr_ids.h          (firmware)
+#   Tools/instrumentation/generated/instrumentation.json  (host analyzer)
+#
+# Event IDs must lie inside the TraceX user event range
+# TX_TRACE_USER_EVENT_START (4096 / 0x1000) .. TX_TRACE_USER_EVENT_END (65535).
+#
+# Every TraceX record reserves four ULONG information fields regardless of how
+# many are used, so events are enriched with everything cheaply available at
+# that point instead of emitting additional events.
+# -----------------------------------------------------------------------------
+
+version: 1
+
+# Correlation key used to stitch a frame's lifetime together on the host.
+correlation_key: frame_id
+
+trace:
+  # TX_TRACE_TIME_SOURCE for the cortex_m55/gnu port resolves to 0xE0001004,
+  # i.e. DWT->CYCCNT, clocked at the CPU frequency. 32 bit -> wraps every
+  # ~5.37 s at 800 MHz, so the host unwraps monotonically while walking the ring.
+  timestamp_source: DWT_CYCCNT
+  timestamp_bits: 32
+  default_cpu_hz: 800000000
+
+events:
+
+  # --- Capture -------------------------------------------------------------
+  FRAME_CAPTURED:
+    id: 0x1001
+    track: Capture
+    description: DCMIPP pipe1 frame-complete ISR; a new camera frame is available.
+    args:
+      - { name: frame_id,      type: u32 }
+      - { name: pending,       type: u32, description: Frames captured but not yet consumed by the encoder }
+      - { name: encoded_count, type: u32, description: Running count of successfully encoded frames }
+      - { name: reserved,      type: u32 }
+
+  FRAME_DROPPED:
+    id: 0x1002
+    track: Capture
+    description: Captured frame skipped by the encoder thread (ping-pong overflow).
+    args:
+      - { name: frame_id,   type: u32 }
+      - { name: skip_count, type: u32, description: Running count of skipped frames }
+      - { name: reason,     type: u32, enum: drop_reason }
+      - { name: reserved,   type: u32 }
+
+  # --- Video encoder -------------------------------------------------------
+  VENC_SUBMITTED:
+    id: 0x1101
+    track: VENC
+    description: Frame handed to H264EncStrmEncode().
+    args:
+      - { name: frame_id,    type: u32 }
+      - { name: coding_type, type: u32, enum: coding_type }
+      - { name: queue_level, type: u32, description: Frames currently held in the output ring buffer }
+      - { name: out_buf_size, type: u32, unit: bytes }
+
+  VENC_DONE:
+    id: 0x1102
+    track: VENC
+    description: >
+      Encode completed and the bitstream was queued for the SD writer.
+      Doubles as FRAME_WRITE_QUEUED: the tx_queue_send() happens at the same
+      instant, so no separate event is emitted (see also native TX_TRACE_QUEUE_SEND).
+    args:
+      - { name: frame_id,       type: u32 }
+      - { name: encoded_bytes,  type: u32, unit: bytes }
+      - { name: bitstream_fill, type: u32, description: Frames held in the output ring buffer after push }
+      - { name: coding_type,    type: u32, enum: coding_type }
+
+  VENC_ERROR:
+    id: 0x1103
+    track: VENC
+    description: Encoder returned a non-OK status for this frame.
+    args:
+      - { name: frame_id,      type: u32 }
+      - { name: status,        type: i32 }
+      - { name: encoded_bytes, type: u32, unit: bytes }
+      - { name: reserved,      type: u32 }
+
+  # --- Storage -------------------------------------------------------------
+  # Native FX_TRACE_FILE_WRITE (id 254) carries file ptr / buffer / size /
+  # bytes-written but is emitted only on completion, so it provides no start
+  # timestamp and no frame_id. The BEGIN event below supplies exactly the two
+  # missing pieces; nothing else is duplicated.
+  FRAME_WRITE_BEGIN:
+    id: 0x1201
+    track: Storage
+    description: About to call fx_file_write() for this frame.
+    args:
+      - { name: frame_id,    type: u32 }
+      - { name: bytes,       type: u32, unit: bytes }
+      - { name: file_number, type: u32 }
+      - { name: file_frames, type: u32, description: Frames written into the current file so far }
+
+  FRAME_WRITTEN:
+    id: 0x1202
+    track: Storage
+    description: fx_file_write() returned for this frame.
+    args:
+      - { name: frame_id,    type: u32 }
+      - { name: bytes,       type: u32, unit: bytes }
+      - { name: status,      type: i32, description: "FileX status, 0 == FX_SUCCESS" }
+      - { name: file_number, type: u32 }
+
+  FILE_ROTATED:
+    id: 0x1203
+    track: Storage
+    description: A new output file was opened.
+    args:
+      - { name: file_number,     type: u32 }
+      - { name: prev_file_frames, type: u32 }
+      - { name: reserved0,       type: u32 }
+      - { name: reserved1,       type: u32 }
+
+  # --- Meta ----------------------------------------------------------------
+  SCHEMA_INFO:
+    id: 0x1FFF
+    track: Meta
+    description: >
+      Emitted once at startup so the host can detect an incompatible event
+      definition and learn the timestamp frequency. May be overwritten in a
+      long run once the ring wraps; the converter then falls back to CLI options.
+    args:
+      - { name: schema_version, type: u32 }
+      - { name: schema_hash,    type: u32 }
+      - { name: cpu_hz,         type: u32, unit: hz }
+      - { name: ticks_per_sec,  type: u32 }
+
+enums:
+  coding_type:
+    # H264EncPictureCodingType
+    0: INTRA
+    1: PREDICTED
+    2: BIPREDICTED
+    3: NOTCODED
+  drop_reason:
+    1: CAPTURE_OVERFLOW
+
+# -----------------------------------------------------------------------------
+# Metrics are derived on the host from the raw events above. Nothing here is
+# computed on the target.
+# -----------------------------------------------------------------------------
+metrics:
+
+  capture_fps:
+    type: event_rate
+    event: FRAME_CAPTURED
+    unit: fps
+
+  frame_period:
+    type: period
+    event: FRAME_CAPTURED
+    unit: us
+
+  venc_duration:
+    type: delta
+    start: VENC_SUBMITTED
+    end: VENC_DONE
+    key: frame_id
+    unit: us
+
+  write_duration:
+    type: delta
+    start: FRAME_WRITE_BEGIN
+    end: FRAME_WRITTEN
+    key: frame_id
+    unit: us
+
+  capture_to_encoded:
+    type: delta
+    start: FRAME_CAPTURED
+    end: VENC_DONE
+    key: frame_id
+    unit: us
+
+  capture_to_written:
+    type: delta
+    start: FRAME_CAPTURED
+    end: FRAME_WRITTEN
+    key: frame_id
+    unit: us
+
+  encoded_bitrate:
+    type: event_sum_rate
+    event: VENC_DONE
+    value: encoded_bytes
+    scale: 8
+    unit: bit/s
+
+  sd_throughput:
+    type: event_sum_rate
+    event: FRAME_WRITTEN
+    value: bytes
+    unit: byte/s
+
+  encoded_frame_size:
+    type: distribution
+    event: VENC_DONE
+    value: encoded_bytes
+    unit: bytes
+
+  bitstream_fill:
+    type: gauge
+    event: VENC_DONE
+    value: bitstream_fill
+    unit: frames
+
+  venc_queue_level:
+    type: gauge
+    event: VENC_SUBMITTED
+    value: queue_level
+    unit: frames
+
+  capture_backlog:
+    type: gauge
+    event: FRAME_CAPTURED
+    value: pending
+    unit: frames
+
+# -----------------------------------------------------------------------------
+# Perfetto flow: the ordered stages a frame_id passes through. The exporter
+# draws a flow arrow between consecutive stages that are present for a frame.
+# -----------------------------------------------------------------------------
+flows:
+  frame_pipeline:
+    key: frame_id
+    stages:
+      - FRAME_CAPTURED
+      - VENC_SUBMITTED
+      - VENC_DONE
+      - FRAME_WRITE_BEGIN
+      - FRAME_WRITTEN
+
+# Slices rendered on the application tracks.
+slices:
+  VENC:
+    track: VENC
+    begin: VENC_SUBMITTED
+    end: VENC_DONE
+    key: frame_id
+    name: encode
+  SD_WRITE:
+    track: Storage
+    begin: FRAME_WRITE_BEGIN
+    end: FRAME_WRITTEN
+    key: frame_id
+    name: fx_file_write

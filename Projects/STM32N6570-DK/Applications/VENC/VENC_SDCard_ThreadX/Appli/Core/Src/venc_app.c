@@ -33,6 +33,7 @@
 #include "venc_h264_config.h"
 #include "dcmipp_app.h"
 #include "frame_rb.h"
+#include "instrumentation.h"
 
 
 /** @addtogroup Templates
@@ -49,6 +50,7 @@ typedef struct {
   uint32_t size;
   uint32_t * block_addr;
   uint32_t * aligned_block_addr;
+  uint32_t frame_id;
 } venc_output_frame_t;
 /* Private define ------------------------------------------------------------*/
 /* Align and use unsigned suffixes for sizes/counts */
@@ -75,6 +77,8 @@ static uint32_t nbLineEvent=0;
 static uint32_t outputBlockSize; 
 static uint32_t *g_curr_block = NULL;
 static uint32_t g_max_output_buffer_size = 0U;
+/* frame_id of the block handed out by the last VENC_APP_GetData() call */
+static uint32_t g_curr_frame_id = 0U;
 
 /* Input Frame : in internal ram */
 venc_output_frame_t enc_queue_buf[VENC_APP_QUEUE_SIZE];
@@ -84,7 +88,7 @@ TX_QUEUE enc_frame_queue;
 
 /* Private function prototypes -----------------------------------------------*/
 static int encoder_prepare(void);
-static int encode_frame(void);
+static int encode_frame(uint32_t frame_id);
 static int encoder_end(void);
 static int encoder_start(void);
 
@@ -208,12 +212,17 @@ void venc_thread_func(ULONG arg)
     }
 
     tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG, TX_AND_CLEAR, &flags, TX_WAIT_FOREVER);
+
+    /* Reuse the existing capture counter as the pipeline-wide correlation key. */
+    uint32_t frame_id = frame_received;
+
     if (IsVideoOverflow())
     {
       nbFrameSkip++;
+      INSTR_EVENT(INSTR_ID_FRAME_DROPPED, frame_id, nbFrameSkip, 1U /* CAPTURE_OVERFLOW */, 0U);
       continue; 
     }
-    if(encode_frame())
+    if(encode_frame(frame_id))
     {
       printf("error encoding frame\n");
     }
@@ -364,12 +373,14 @@ uint32_t nb_encoded_frame = 0;
  *
  * @return 0 on success, -1 on failure.
  */
-static int encode_frame(void)
+static int encode_frame(uint32_t frame_id)
 {
   venc_output_frame_t frame_buffer = {0};
   int ret = H264ENC_FRAME_READY;
     uint32_t outBufSize;
   uint32_t buff_size = g_max_output_buffer_size ? g_max_output_buffer_size : outputBlockSize;
+
+  frame_buffer.frame_id = frame_id;
 
   if (!(frame_nb % hVencH264Instance.cfgH264Rate.gopLen))
   {
@@ -424,6 +435,8 @@ static int encode_frame(void)
   
 
   /* Encode Frame*/
+  INSTR_EVENT(INSTR_ID_VENC_SUBMITTED, frame_id, (uint32_t)encIn.codingType,
+              frb_get_frames_stored(), buff_size);
   ret = H264EncStrmEncode(encoder, &encIn, &encOut, NULL, NULL, NULL);
 
   /* Measure encode time*/
@@ -437,6 +450,7 @@ static int encode_frame(void)
     {
       encIn.codingType = H264ENC_INTRA_FRAME;
       release_output_block(frame_buffer.block_addr);
+      INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)ret, 0U, 0U);
       return -1;
     }
     invalidate_dcache_region((const void *)encIn.pOutBuf, encOut.streamSize);
@@ -449,8 +463,12 @@ static int encode_frame(void)
     if (frb_push(frame_buffer.block_addr, frame_buffer.size, 0U) == false)
     {
       release_output_block(frame_buffer.block_addr);
+      INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)-1, frame_buffer.size, 0U);
       return -1;
     }
+    /* Also marks the hand-off to the SD writer; tx_queue_send() follows immediately. */
+    INSTR_EVENT(INSTR_ID_VENC_DONE, frame_id, frame_buffer.size,
+                frb_get_frames_stored(), frame_buffer.coding_type);
     if(tx_queue_send(&enc_frame_queue, (void *) &frame_buffer, TX_WAIT_FOREVER) != TX_SUCCESS)
     {
       return -1;
@@ -461,11 +479,13 @@ static int encode_frame(void)
   case H264ENC_FUSE_ERROR:
     printf("DCMIPP and VENC desync (frame#%ld), restart the video\n", frame_nb);
     release_output_block(frame_buffer.block_addr);
+    INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)ret, 0U, 0U);
     encoder_reset();
     break;
   default:
     printf("error encoding frame %d\n", ret);
     release_output_block(frame_buffer.block_addr);
+    INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)ret, 0U, 0U);
     encIn.codingType = H264ENC_INTRA_FRAME;
     return -1;
     break;
@@ -512,6 +532,8 @@ void BSP_CAMERA_FrameEventCallback(uint32_t instance)
   /* signal new frame */
   nbLineEvent = 0;
   frame_received++;
+  INSTR_EVENT(INSTR_ID_FRAME_CAPTURED, frame_received,
+              frame_received - last_frame_received, nb_encoded_frame, 0U);
   if (TX_SUCCESS != tx_event_flags_set(&venc_app_flags, FRAME_RECEIVED_FLAG, TX_OR))
   {
     Error_Handler();
@@ -603,7 +625,16 @@ INT VENC_APP_GetData(UCHAR **data, ULONG *size)
   *data = (UCHAR *) frame_block.aligned_block_addr;
   *size = frame_block.size;
   g_curr_block = frame_block.block_addr;
+  g_curr_frame_id = frame_block.frame_id;
   return(frame_block.coding_type);
+}
+
+/**
+ * @brief Correlation key of the block returned by the last VENC_APP_GetData().
+ */
+uint32_t VENC_APP_GetFrameId(void)
+{
+  return g_curr_frame_id;
 }
 
 /**

@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 #include "main.h"
 #include "venc_app.h"
+#include "instrumentation.h"
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
@@ -82,6 +83,7 @@ VOID tx_application_define(VOID *first_unused_memory)
   {
       Error_Handler();
   }
+  INSTR_Init();
   #endif
 
   if (tx_byte_pool_create(&tx_app_byte_pool, "Tx App memory pool", tx_byte_pool_buffer, TX_APP_MEM_POOL_SIZE) != TX_SUCCESS)

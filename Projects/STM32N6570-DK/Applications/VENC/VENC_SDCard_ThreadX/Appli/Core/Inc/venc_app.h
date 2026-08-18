@@ -67,6 +67,13 @@ void VENC_APP_EncodingStart(void);
 INT VENC_APP_GetData(UCHAR **data, ULONG *size);
 
 /**
+ * @brief  Correlation key (frame id) of the block returned by the last
+ *         VENC_APP_GetData() call.
+ * @retval uint32_t frame id
+ */
+uint32_t VENC_APP_GetFrameId(void);
+
+/**
  * @brief  Stop the video encoding pipeline and release resources.
  * @retval UINT Status code
  */

@@ -1,0 +1,443 @@
+{
+  "correlation_key": "frame_id",
+  "enums": {
+    "coding_type": {
+      "0": "INTRA",
+      "1": "PREDICTED",
+      "2": "BIPREDICTED",
+      "3": "NOTCODED"
+    },
+    "drop_reason": {
+      "1": "CAPTURE_OVERFLOW"
+    }
+  },
+  "events": {
+    "FILE_ROTATED": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "file_number",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "prev_file_frames",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved0",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved1",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "A new output file was opened.",
+      "id": 4611,
+      "track": "Storage"
+    },
+    "FRAME_CAPTURED": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "Frames captured but not yet consumed by the encoder",
+          "enum": null,
+          "name": "pending",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "Running count of successfully encoded frames",
+          "enum": null,
+          "name": "encoded_count",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "DCMIPP pipe1 frame-complete ISR; a new camera frame is available.",
+      "id": 4097,
+      "track": "Capture"
+    },
+    "FRAME_DROPPED": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "Running count of skipped frames",
+          "enum": null,
+          "name": "skip_count",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": "drop_reason",
+          "name": "reason",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "Captured frame skipped by the encoder thread (ping-pong overflow).",
+      "id": 4098,
+      "track": "Capture"
+    },
+    "FRAME_WRITE_BEGIN": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "bytes",
+          "type": "u32",
+          "unit": "bytes"
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "file_number",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "Frames written into the current file so far",
+          "enum": null,
+          "name": "file_frames",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "About to call fx_file_write() for this frame.",
+      "id": 4609,
+      "track": "Storage"
+    },
+    "FRAME_WRITTEN": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "bytes",
+          "type": "u32",
+          "unit": "bytes"
+        },
+        {
+          "description": "FileX status, 0 == FX_SUCCESS",
+          "enum": null,
+          "name": "status",
+          "type": "i32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "file_number",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "fx_file_write() returned for this frame.",
+      "id": 4610,
+      "track": "Storage"
+    },
+    "SCHEMA_INFO": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "schema_version",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "schema_hash",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "cpu_hz",
+          "type": "u32",
+          "unit": "hz"
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "ticks_per_sec",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "Emitted once at startup so the host can detect an incompatible event definition and learn the timestamp frequency. May be overwritten in a long run once the ring wraps; the converter then falls back to CLI options.",
+      "id": 8191,
+      "track": "Meta"
+    },
+    "VENC_DONE": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "encoded_bytes",
+          "type": "u32",
+          "unit": "bytes"
+        },
+        {
+          "description": "Frames held in the output ring buffer after push",
+          "enum": null,
+          "name": "bitstream_fill",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": "coding_type",
+          "name": "coding_type",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "Encode completed and the bitstream was queued for the SD writer. Doubles as FRAME_WRITE_QUEUED: the tx_queue_send() happens at the same instant, so no separate event is emitted (see also native TX_TRACE_QUEUE_SEND).",
+      "id": 4354,
+      "track": "VENC"
+    },
+    "VENC_ERROR": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "status",
+          "type": "i32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "encoded_bytes",
+          "type": "u32",
+          "unit": "bytes"
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "Encoder returned a non-OK status for this frame.",
+      "id": 4355,
+      "track": "VENC"
+    },
+    "VENC_SUBMITTED": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "frame_id",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": "coding_type",
+          "name": "coding_type",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "Frames currently held in the output ring buffer",
+          "enum": null,
+          "name": "queue_level",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "out_buf_size",
+          "type": "u32",
+          "unit": "bytes"
+        }
+      ],
+      "description": "Frame handed to H264EncStrmEncode().",
+      "id": 4353,
+      "track": "VENC"
+    }
+  },
+  "flows": {
+    "frame_pipeline": {
+      "key": "frame_id",
+      "stages": [
+        "FRAME_CAPTURED",
+        "VENC_SUBMITTED",
+        "VENC_DONE",
+        "FRAME_WRITE_BEGIN",
+        "FRAME_WRITTEN"
+      ]
+    }
+  },
+  "metrics": {
+    "bitstream_fill": {
+      "event": "VENC_DONE",
+      "type": "gauge",
+      "unit": "frames",
+      "value": "bitstream_fill"
+    },
+    "capture_backlog": {
+      "event": "FRAME_CAPTURED",
+      "type": "gauge",
+      "unit": "frames",
+      "value": "pending"
+    },
+    "capture_fps": {
+      "event": "FRAME_CAPTURED",
+      "type": "event_rate",
+      "unit": "fps"
+    },
+    "capture_to_encoded": {
+      "end": "VENC_DONE",
+      "key": "frame_id",
+      "start": "FRAME_CAPTURED",
+      "type": "delta",
+      "unit": "us"
+    },
+    "capture_to_written": {
+      "end": "FRAME_WRITTEN",
+      "key": "frame_id",
+      "start": "FRAME_CAPTURED",
+      "type": "delta",
+      "unit": "us"
+    },
+    "encoded_bitrate": {
+      "event": "VENC_DONE",
+      "scale": 8,
+      "type": "event_sum_rate",
+      "unit": "bit/s",
+      "value": "encoded_bytes"
+    },
+    "encoded_frame_size": {
+      "event": "VENC_DONE",
+      "type": "distribution",
+      "unit": "bytes",
+      "value": "encoded_bytes"
+    },
+    "frame_period": {
+      "event": "FRAME_CAPTURED",
+      "type": "period",
+      "unit": "us"
+    },
+    "sd_throughput": {
+      "event": "FRAME_WRITTEN",
+      "type": "event_sum_rate",
+      "unit": "byte/s",
+      "value": "bytes"
+    },
+    "venc_duration": {
+      "end": "VENC_DONE",
+      "key": "frame_id",
+      "start": "VENC_SUBMITTED",
+      "type": "delta",
+      "unit": "us"
+    },
+    "venc_queue_level": {
+      "event": "VENC_SUBMITTED",
+      "type": "gauge",
+      "unit": "frames",
+      "value": "queue_level"
+    },
+    "write_duration": {
+      "end": "FRAME_WRITTEN",
+      "key": "frame_id",
+      "start": "FRAME_WRITE_BEGIN",
+      "type": "delta",
+      "unit": "us"
+    }
+  },
+  "schema_hash": 3875499551,
+  "schema_version": 1,
+  "slices": {
+    "SD_WRITE": {
+      "begin": "FRAME_WRITE_BEGIN",
+      "end": "FRAME_WRITTEN",
+      "key": "frame_id",
+      "name": "fx_file_write",
+      "track": "Storage"
+    },
+    "VENC": {
+      "begin": "VENC_SUBMITTED",
+      "end": "VENC_DONE",
+      "key": "frame_id",
+      "name": "encode",
+      "track": "VENC"
+    }
+  },
+  "trace": {
+    "default_cpu_hz": 800000000,
+    "timestamp_bits": 32,
+    "timestamp_source": "DWT_CYCCNT"
+  }
+}

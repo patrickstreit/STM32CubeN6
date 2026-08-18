@@ -48,6 +48,7 @@ set(APP_Defines
     TX_SINGLE_MODE_SECURE
     TX_EXECUTION_PROFILE_ENABLE
     TX_ENABLE_EVENT_TRACE
+    FX_ENABLE_EVENT_TRACE
     $<$<CONFIG:Debug>:DEBUG>
 )
 
@@ -88,6 +89,7 @@ set(APP_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_threadx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/dcmipp_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/fx_stm32_sd_driver_glue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/instrumentation.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/lcd_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sdcard_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32n6xx_hal_timebase_tim.c

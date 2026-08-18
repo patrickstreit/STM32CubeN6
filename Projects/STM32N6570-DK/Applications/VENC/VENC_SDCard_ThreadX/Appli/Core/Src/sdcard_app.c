@@ -25,12 +25,13 @@
 #include "app_filex.h"
 #include "h264encapi.h"
 #include "st_monitor_bitrate.h"
+#include "venc_app.h"
+#include "instrumentation.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
 #define NB_FRAMES_PER_FILE (30U*10U) /* 10sec  @ 30 fps*/
-#define TRACE_EVENT_TEST (TX_TRACE_USER_EVENT_START + 0)
 /* Private variables ---------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 
@@ -46,6 +47,7 @@ void sdcard_thread_func(ULONG arg)
 {
   CHAR filename[10];
   UINT filenumber = 0;
+  UINT current_file = 0;
   UCHAR * data = NULL;
   ULONG size = 0;
   ULONG nb_frames = 0;
@@ -89,13 +91,8 @@ void sdcard_thread_func(ULONG arg)
         printf("FileX failed to open %s\n", filename);
         return;
       }
-      tx_trace_user_event_insert(
-      TRACE_EVENT_TEST,
-      filenumber,
-      0x2222,
-      0x3333,
-      0x4444
-      );
+      INSTR_EVENT(INSTR_ID_FILE_ROTATED, filenumber, nb_frames, 0U, 0U);
+      current_file = filenumber;
       filenumber++;
       nb_frames = 1;
     }
@@ -103,7 +100,13 @@ void sdcard_thread_func(ULONG arg)
     /* Write the frame to the SD card. */
     if (data && size)
     {
-      VENC_FileX_write((CHAR*)data, (LONG)size);
+      ULONG frame_id = VENC_APP_GetFrameId();
+      UINT write_status;
+
+      INSTR_EVENT(INSTR_ID_FRAME_WRITE_BEGIN, frame_id, size, current_file, nb_frames);
+      write_status = VENC_FileX_write((CHAR*)data, (LONG)size);
+      INSTR_EVENT(INSTR_ID_FRAME_WRITTEN, frame_id, size, write_status, current_file);
+
       monitor_bitrate("video", (uint32_t)size);
       data = NULL; size = 0;
       BSP_LED_Toggle(LED_RED);
