@@ -240,7 +240,7 @@ Set in `Appli/Core/Src/instrumentation.c` via `tx_trace_event_filter()`.
 | `TX_TRACE_EVENT_FLAGS_EVENTS` | filtered | 2×/frame, adds nothing over `FRAME_CAPTURED` |
 | `TX_TRACE_INTERRUPT_CONTROL` | filtered | very high rate, no analytical value |
 | `TX_TRACE_MUTEX_EVENTS` | filtered | not on the data path |
-| **`TX_TRACE_SEMAPHORE_EVENTS`** | **filtered** | ⚠️ **see §8 — required for write-stall analysis** |
+| **`TX_TRACE_SEMAPHORE_EVENTS`** | **kept** | `sd_tx_semaphore` GET→PUT is the hardware wait in the write path |
 | `TX_TRACE_TIME_EVENTS` | filtered | tick bookkeeping |
 | `TX_TRACE_TIMER_EVENTS` | filtered | tick bookkeeping |
 | `FX_TRACE_INTERNAL_EVENTS` | filtered | per-sector driver I/O would dominate the ring |
@@ -312,13 +312,18 @@ frames captured 2'463 → encoded 2'198, dropped 17
 The SD write path is the bottleneck; its stalls back-pressure the encoder,
 which is why `captured` exceeds `encoded`.
 
+> The `write_duration` figures above are the **pre-fix** baseline. See §8 for
+> what changed and the current numbers.
+
 ---
 
-## 8. Next task — locate the cause of the write stalls
+## 8. Closed — the write path issued one DMA transfer per sector
 
-Goal: explain `write_duration` p99 380 ms / max 1.8 s.
+Goal was to explain `write_duration` p99 380 ms / max 1.8 s. Two independent
+causes were found and fixed; the outlier tail (§8.4) remains open but is card
+behaviour, not driver behaviour.
 
-### Established call path
+### 8.1 Call path (unchanged, still the map of the area)
 
 ```
 sdcard_app.c            VENC_FileX_write()
@@ -327,11 +332,11 @@ sdcard_app.c            VENC_FileX_write()
           ├─ check_sd_status()                                                      :35   busy-wait, 10 s timeout
           │    └─ fx_stm32_sd_get_status()          Appli/Core/Src/fx_stm32_sd_driver_glue.c:83
           │         └─ HAL_SD_GetCardState() != TRANSFER                            :96
-          └─ sd_write_data()                                                        :285
-              ├─ per-sector loop when unaligned                                     :355  ← slow path
+          └─ sd_write_data()                                                        :342
+              ├─ per-sector loop when unaligned                                     :351  ← was the slow path
               ├─ fx_stm32_sd_write_blocks()                                         :365
               │    └─ HAL_SD_WriteBlocks_DMA()                              glue    :150  returns immediately
-              └─ FX_STM32_SD_WRITE_CPLT_NOTIFY()                                    :373  ← BLOCKS HERE
+              └─ FX_STM32_SD_WRITE_CPLT_NOTIFY()                                    :376  ← blocks here
                    └─ tx_semaphore_get(&sd_tx_semaphore, 10 s)
                                               Appli/Core/Inc/fx_stm32_sd_driver.h   :148
 
@@ -340,51 +345,122 @@ sdcard_app.c            VENC_FileX_write()
              └─ tx_semaphore_put(&sd_tx_semaphore)                          glue    :171
 ```
 
-### Hypotheses to discriminate
+### 8.2 Verdict on the hypotheses
 
-| # | Hypothesis | Distinguishing evidence |
+| # | Hypothesis | Verdict |
 | --- | --- | --- |
-| H1 | Card-internal busy (wear levelling / erase) | long gap between `WriteBlocks_DMA` and `TxCpltCallback` |
-| H2 | `check_sd_status()` polling before the write | time consumed *before* the DMA even starts |
-| H3 | Unaligned buffer → per-sector loop | many small transfers per `fx_file_write` |
-| H4 | `fx_media_flush()` on file rotation (every 300 frames) | stalls correlate with `FILE_ROTATED` |
-| H5 | Lost IRQ / DMA stall | semaphore wait ends near the 10 s timeout, `FX_IO_ERROR` |
+| H1 | Card-internal busy (wear levelling / erase) | **partly confirmed** — accounts for the remaining outliers only |
+| H2 | `check_sd_status()` polling before the write | not observed |
+| H3 | Unaligned buffer → per-sector loop | **confirmed, dominant** |
+| H4 | `fx_media_flush()` on file rotation | not the cause of the bulk cost; rotation is a separate problem, see §9 |
+| H5 | Lost IRQ / DMA stall | not observed |
 
-### Step 1 — costs nothing, do it first
+### 8.3 Root causes and fixes
 
-**`TX_TRACE_SEMAPHORE_EVENTS` is currently filtered out**, so the single most
-important wait in the system is invisible. Remove it from
-`INSTR_TRACE_FILTER_MASK` in `Appli/Core/Src/instrumentation.c`, rebuild, flash,
-recapture. `TX_SEMAPHORE_GET` / `TX_SEMAPHORE_PUT` on `sd_tx_semaphore` then
-immediately separate H1/H5 from H2/H3/H4 — **no new events, no YAML change**.
+**Cause 1 — word alignment (≈8.8 s of 10.25 s DMA time).**
+`fx_file_write()` splits every write into head-partial / bulk / tail-partial and
+hands the driver `data + (512 - file_offset % 512)` for the bulk
+(`fx_file_write.c:1284-1396`). `fx_stm32_sd_driver.c:80` tests only
+`buffer & 3`; on a miss `sd_write_data()` copies each sector through the static
+`scratch[512]` and issues **one HAL call per sector** — measured ≈0.91 ms/block
+versus ≈0.027 ms/block for a large multi-block transfer. Frame sizes are
+arbitrary, so the pointer was word aligned in only 1 of 4 writes.
 
-Consider also temporarily enabling `FX_TRACE_INTERNAL_EVENTS`, whose
-`FX_INTERNAL_IO_DRIVER_WRITE` (media ptr, sector, sector count, buffer) directly
-settles H3. It is high-rate, so pair it with a shorter capture.
+*Fix:* `VENC_FileX_write()` in `app_filex.c` rounds every write size up to a
+multiple of 4 and zeroes the padding. `file_offset` then stays 4-aligned by
+induction, so the bulk pointer always is too.
 
-### Step 2 — add events only for what is still ambiguous
+- The padding bytes are legal `trailing_zero_8bits` in the Annex B byte stream.
+- They fit inside the frame's own slot: `frame_rb.c` already rounds every
+  allocation up to 8 bytes (`ALIGN_TO_8_BYTES`).
+- `h264_bitstream` is `__NON_CACHEABLE`, so no cache maintenance is needed for
+  the pad bytes.
+- **Aligning the ring buffer addresses does nothing.** The addresses were
+  already 8-aligned. The *file offset* decides.
 
-Suggested ids (`0x12xx` = storage): `SD_WRITE_BLOCKS` (start_block, block_count,
-hal_status), `SD_WRITE_CPLT` (from `HAL_SD_TxCpltCallback`), `SD_STATUS_WAIT`
-(poll iterations, elapsed). Follow §3.
+**Cause 2 — the sector cache held a single entry (≈1.1 s).**
+`fx_sd_media_memory` was 512 bytes, so `fx_media_sector_cache_size` was 1
+(`fx_media_open.c:368`). Every FAT access evicted the dirty sector at the frame
+boundary, forcing it to be written twice.
 
-`fx_stm32_sd_driver_glue.c` is already compiled into the application; adding
-`#include "instrumentation.h"` there is all that is required.
+*Fix:* 64 sectors (32 KB) in `app_filex.c`. A power of two ≥
+`FX_SECTOR_CACHE_HASH_ENABLE` (16) also enables the hashed cache lookup.
+Trade-off: dirty sectors are flushed later, so the data-loss window on power
+failure is larger.
 
-Relevant context for that file:
-- `sd_tx_semaphore` / `sd_rx_semaphore` declared at `glue:15-16`
-- media sector cache is a **single 512-byte sector** (`app_filex.c:59`)
-- `fx_media_flush()` at `app_filex.c:260`, called from file close
-- `FX_STM32_SD_DEFAULT_TIMEOUT` = 10 s (`fx_stm32_sd_driver.h:47`)
+### 8.4 Result
 
-### Step 3 — correlate in Perfetto
+| Metric | Baseline | +4-byte padding | +64-sector cache |
+| --- | --- | --- | --- |
+| DMA transfers / frame | 12.33 | 2.39 | **1.81** |
+| single-block transfers / frame | 12.09 | 1.40 | **0.81** |
+| avg `fx_file_write` | 24.94 ms | 4.28 ms | **3.85 ms** |
+| max `fx_file_write` | 805 ms | 705 ms | **570 ms** |
 
-`Tools/trace/perfetto_query_snippets.sql` has ready queries for slowest writes,
-stall-vs-rotation correlation and queue depth at stall time.
+Stopped here: the remaining ≈0.8 single-block writes per frame are the sector
+straddling two frames, which must be written at least once. Eliminating it
+requires 512-byte-aligned writes — either a ~128 KB accumulation buffer in
+`VENC_FileX_write()` or padding every frame to a 512 multiple (+4 % file size).
+Estimated further gain ≈2 s of ≈4 s DMA time. Judged not worth it against the
+rotation problem in §9.
+
+The `max` column is card-internal garbage collection (H1) and is unaffected by
+any of this.
+
+### 8.5 Instrumentation and queries added
+
+- `SD_WRITE_BLOCKS` gained a fourth argument `buffer_addr` (the previously
+  unused `reserved` slot) in `instrumentation.yaml`, emitted from
+  `fx_stm32_sd_driver_glue.c`.
+- `perfetto_query_snippets.sql` gained **B1–B7**. Re-run B1, B4 and B7 after any
+  change to the write path; B4 is the single comparison row.
+
+**Two method traps, both hit during this work:**
+
+1. Logging the address passed to `HAL_SD_WriteBlocks_DMA()` **cannot** prove the
+   alignment hypothesis. In the fallback path that address *is* `scratch`, which
+   is always aligned. B6 is therefore useless and marked as such. Group
+   transfers **by** address (B7) and resolve them through
+   `Appli/build/Debug/VENC_SDCard_ThreadX_Appli.map` instead — that is how
+   `scratch` (`0x3407F140`) and `fx_sd_media_memory` (`0x3407FB20`) were
+   identified.
+2. FileX already issues at most 3 driver requests per write regardless of cache
+   size. Do not confuse *driver requests* with *DMA transfers*; only the latter
+   exploded. The frames that already behaved well before any fix are the proof
+   that cache size was not the limiter.
 
 ---
 
-## 9. Development
+## 9. Next task — the stall at file rotation
+
+Not investigated yet. Observed after the §8 fixes, from the same traces:
+
+- `venc_queue_level` saturates during file rotation.
+- The `encode` slice stops for the duration.
+- Many `TX_SEMAPHORE_GET`/`PUT` on the **rx** semaphore, none on the **tx**
+  semaphore, in that window.
+- `max fx_file_write` is still 570 ms; check whether those outliers cluster
+  around `FILE_ROTATED` (query 3 in the snippets file) or are spread out — the
+  latter would confirm they are card garbage collection and unrelated.
+
+Unverified starting points, from earlier work on this project and **not**
+re-checked in this session:
+
+- `venc_thread` was given a higher priority (11) than `sdcard_thread` (12)
+  because ThreadX does not round-robin equal-priority threads without a time
+  slice.
+- A double-buffered `FX_FILE` preallocation
+  (`VENC_FileX_PrepareNext` / `ActivatePrepared`) was added so that the slow
+  `fx_file_extended_best_effort_allocate()` cluster search runs ahead of the
+  rotation rather than during it.
+
+Confirm both are actually present and effective before drawing conclusions.
+The rx-semaphore-without-tx-semaphore pattern suggests the writer thread is
+blocked on something other than a write completion; identify what holds it.
+
+---
+
+## 10. Development
 
 ```powershell
 python Tools/trace/selftest.py                    # synthetic buffer, no hardware

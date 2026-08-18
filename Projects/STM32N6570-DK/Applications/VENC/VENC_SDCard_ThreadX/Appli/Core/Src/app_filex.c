@@ -64,8 +64,12 @@ CARD_STATUS_CONNECTED           = 77
 /* Main thread global data structures.  */
 TX_THREAD       fx_app_thread;
 
-/* Buffer for FileX FX_MEDIA sector cache. */
-ALIGN_32BYTES (uint32_t fx_sd_media_memory[FX_STM32_SD_DEFAULT_SECTOR_SIZE / sizeof(uint32_t)]);
+/* Buffer for FileX FX_MEDIA sector cache. FileX derives the number of cache
+   entries from this size; a power-of-two count >= 16 also enables the hashed
+   cache lookup. One entry is not enough here: FAT accesses evict the dirty
+   sector at the frame boundary and force it to be written twice. */
+#define FX_SD_MEDIA_CACHE_SECTORS        64
+ALIGN_32BYTES (uint32_t fx_sd_media_memory[(FX_SD_MEDIA_CACHE_SECTORS * FX_STM32_SD_DEFAULT_SECTOR_SIZE) / sizeof(uint32_t)]);
 /* Define FileX global data structures.  */
 FX_MEDIA        sdio_disk;
 
@@ -240,8 +244,24 @@ UINT VENC_FileX_Open(CHAR * filename)
 
 UINT VENC_FileX_write(CHAR * data, LONG size)
 {
+  /* fx_file_write() hands the SD driver "data + (512 - file_offset % 512)" for
+     the bulk of the transfer. The driver only DMAs a whole request at once when
+     that pointer is word aligned, otherwise it falls back to one transfer per
+     sector (~30x slower). Keeping every write a multiple of 4 bytes keeps the
+     running file offset - and therefore that pointer - word aligned.
+     The padding bytes are legal trailing_zero_8bits in the Annex B byte stream,
+     and the ring buffer already rounds every frame slot up to 8 bytes, so they
+     stay inside the frame's own allocation. */
+  LONG padded_size = (size + 3) & ~((LONG)3);
+  LONG i;
+
+  for (i = size; i < padded_size; i++)
+  {
+    data[i] = 0;
+  }
+
   /* Write the given data to the file.  */
-  UINT status =  fx_file_write(&fx_file, data, size);
+  UINT status =  fx_file_write(&fx_file, data, (ULONG)padded_size);
 
   return status;
 }
