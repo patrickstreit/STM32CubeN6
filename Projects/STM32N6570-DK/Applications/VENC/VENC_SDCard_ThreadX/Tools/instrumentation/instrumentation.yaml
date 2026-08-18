@@ -118,6 +118,36 @@ events:
       - { name: reserved0,       type: u32 }
       - { name: reserved1,       type: u32 }
 
+  SD_WRITE_BLOCKS:
+    id: 0x1204
+    track: Storage_DMA
+    description: HAL_SD_WriteBlocks_DMA() kicked off for the next SD write.
+    args:
+      - { name: start_block, type: u32 }
+      - { name: block_count, type: u32 }
+      - { name: hal_status,  type: i32, description: "0 == HAL_OK" }
+      - { name: reserved,    type: u32 }
+
+  SD_WRITE_CPLT:
+    id: 0x1205
+    track: Storage_DMA
+    description: HAL_SD_TxCpltCallback() fired after the DMA transfer completed.
+    args:
+      - { name: start_block, type: u32 }
+      - { name: block_count, type: u32 }
+      - { name: hal_status,  type: i32, description: "HAL error code from the completed transfer" }
+      - { name: reserved,    type: u32 }
+
+  SD_STATUS_WAIT:
+    id: 0x1206
+    track: Storage
+    description: Status-poll wait for the SD transfer state, used to separate busy-card time from driver overhead.
+    args:
+      - { name: status,     type: i32, description: "HAL_SD_CardStateType" }
+      - { name: reserved0,  type: u32 }
+      - { name: reserved1,  type: u32 }
+      - { name: reserved2,  type: u32 }
+
   # --- Meta ----------------------------------------------------------------
   SCHEMA_INFO:
     id: 0x1FFF
@@ -222,6 +252,12 @@ metrics:
     event: FRAME_CAPTURED
     value: pending
     unit: frames
+  
+  block_count:
+    type: gauge
+    event: SD_WRITE_BLOCKS
+    value: block_count
+    unit: blocks
 
 # -----------------------------------------------------------------------------
 # Perfetto flow: the ordered stages a frame_id passes through. The exporter
@@ -251,3 +287,25 @@ slices:
     end: FRAME_WRITTEN
     key: frame_id
     name: fx_file_write
+  DMA_WRITE:
+    track: Storage_DMA
+    begin: SD_WRITE_BLOCKS
+    end: SD_WRITE_CPLT
+    key: start_block
+    name: HAL_SD_WriteBlocks_DMA
+  SEMAPHORE_RX:
+    track: Semaphore RX
+    begin: TX_SEMAPHORE_GET
+    end: TX_SEMAPHORE_PUT
+    key: semaphore_ptr
+    where:
+      semaphore_ptr_name: sd rx transfer semaphore
+    name: rx semaphore GET -> PUT
+  SEMAPHORE_TX:
+    track: Semaphore TX
+    begin: TX_SEMAPHORE_GET
+    end: TX_SEMAPHORE_PUT
+    key: semaphore_ptr
+    where:
+      semaphore_ptr_name: sd tx transfer semaphore
+    name: tx semaphore GET -> PUT

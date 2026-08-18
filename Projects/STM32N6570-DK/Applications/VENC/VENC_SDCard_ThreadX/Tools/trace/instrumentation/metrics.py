@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from .model import NormalizedTrace
+from .model import NormalizedEvent, NormalizedTrace
 
 
 @dataclass
@@ -192,7 +193,13 @@ def _delta(by_name, spec, unit) -> tuple[Distribution, int]:
     return dist, max(0, unpaired)
 
 
-def pair_events(by_name, begin_name: str, end_name: str, key: str):
+def pair_events(
+    by_name: dict[str, list[NormalizedEvent]],
+    begin_name: str,
+    end_name: str,
+    key: str,
+    where: dict[str, object] | None = None,
+) -> Iterator[tuple[NormalizedEvent, NormalizedEvent]]:
     """Yield (begin, end) pairs correlated on `key`, in chronological order.
 
     The two streams are merged and walked in time order rather than collecting
@@ -207,11 +214,14 @@ def pair_events(by_name, begin_name: str, end_name: str, key: str):
     if not begins or not ends:
         return
 
-    merged = [(e.ts_ns, e.order, 0, e) for e in begins if key in e.args]
-    merged += [(e.ts_ns, e.order, 1, e) for e in ends if key in e.args]
+    def matches(event: NormalizedEvent) -> bool:
+        return all(event.args.get(name) == value for name, value in (where or {}).items())
+
+    merged = [(e.ts_ns, e.order, 0, e) for e in begins if key in e.args and matches(e)]
+    merged += [(e.ts_ns, e.order, 1, e) for e in ends if key in e.args and matches(e)]
     merged.sort(key=lambda item: (item[0], item[1], item[2]))
 
-    pending: dict[int, object] = {}
+    pending: dict[int, NormalizedEvent] = {}
     for _ts, _order, is_end, event in merged:
         k = event.args[key]
         if not is_end:

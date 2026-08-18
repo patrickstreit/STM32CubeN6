@@ -174,42 +174,53 @@ ORDER BY s.ts;
 
 WITH sem AS (
   SELECT
-    s.id as id,
+    s.id,
     s.ts,
     s.name,
     MAX(CASE WHEN a.key = 'debug.semaphore_ptr' THEN a.int_value END) AS sem_ptr,
     MAX(CASE WHEN a.key = 'debug.semaphore_ptr_name' THEN a.string_value END) AS sem_name,
     MAX(CASE WHEN a.key = 'debug.current_count' THEN a.int_value END) AS sem_count,
-    MAX(CASE WHEN a.key = 'debug.wait_option'   THEN a.int_value END) AS wait_option
+    MAX(CASE WHEN a.key = 'debug.wait_option' THEN a.int_value END) AS wait_option
   FROM slice s
   LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
   WHERE s.name IN ('TX_SEMAPHORE_GET', 'TX_SEMAPHORE_PUT')
   GROUP BY s.id
 ),
+ordered AS (
+  SELECT
+    *,
+    LAG(ts) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_ts,
+    LAG(name) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_name,
+    CASE
+      WHEN LOWER(COALESCE(sem_name, '')) LIKE '%rx%' THEN 'RX'
+      WHEN LOWER(COALESCE(sem_name, '')) LIKE '%tx%' THEN 'TX'
+      ELSE 'OTHER'
+    END AS dir
+  FROM sem
+),
 paired AS (
   SELECT
-    id,
     sem_ptr,
     sem_name,
-    LAG(ts) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_ts,
-    ts AS cur_ts,
-    LAG(name) OVER (PARTITION BY sem_ptr ORDER BY ts) AS prev_name,
-    name AS cur_name
-  FROM sem
+    dir,
+    prev_ts AS get_ts,
+    ts AS put_ts,
+    (ts - prev_ts) AS delta_ns,
+    (ts - prev_ts) / 1e6 AS delta_ms
+  FROM ordered
+  WHERE prev_name = 'TX_SEMAPHORE_GET'
+    AND name = 'TX_SEMAPHORE_PUT'
+    AND dir IN ('RX', 'TX')
 )
 SELECT
-  id,
-  sem_ptr,
+  dir,
   sem_name,
-  prev_name,
-  cur_name,
-  (cur_ts - prev_ts) AS delta_ns,
-  (cur_ts - prev_ts) / 1e6 AS delta_ms,
-  prev_ts,
-  cur_ts
+  get_ts,
+  put_ts,
+  delta_ns,
+  delta_ms
 FROM paired
-WHERE prev_ts IS NOT NULL
-ORDER BY delta_ms DESC;
+ORDER BY dir, delta_ms DESC;
 
 -- ---------------------------------------------------------------------------
 -- 11. Event mix — which producer dominates the ring (filter tuning)
@@ -222,3 +233,60 @@ FROM slice
 GROUP BY name
 ORDER BY n DESC
 LIMIT 25;
+
+-- ---------------------------------------------------------------------------
+-- 12. DMA transfer (H4: SD_WRITE_BLOCKS -> SD_WRITE_CPLT)
+-- ---------------------------------------------------------------------------
+select s.id, s.ts, s.dur, s.name, a.key, a.display_value
+from slice s
+join args a on a.arg_set_id = s.arg_set_id
+where s.name = "HAL_SD_WriteBlocks_DMA" and a.key = "debug.block_count";
+
+
+-- ---------------------------------------------------------------------------
+-- 13. Histogram of exact block_count values for DMA write slices
+--     Use this when each distinct transfer size should be shown separately.
+-- ---------------------------------------------------------------------------
+WITH block_counts AS (
+  SELECT
+    s.id,
+    a.int_value AS block_count
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA'
+    AND a.key = 'debug.block_count'
+)
+SELECT
+  block_count,
+  COUNT(*) AS n,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
+FROM block_counts
+GROUP BY block_count
+ORDER BY block_count;
+
+
+-- ---------------------------------------------------------------------------
+-- 14. Histogram of block_count in configurable buckets
+--     Change bucket_width, e.g. from 8 to 16 or 32 blocks as needed.
+-- ---------------------------------------------------------------------------
+WITH params AS (
+  SELECT 8 AS bucket_width
+), block_counts AS (
+  SELECT
+    a.int_value AS block_count,
+    (a.int_value / params.bucket_width) * params.bucket_width AS bucket_start,
+    params.bucket_width
+  FROM slice s
+  JOIN args a ON a.arg_set_id = s.arg_set_id
+  CROSS JOIN params
+  WHERE s.name = 'HAL_SD_WriteBlocks_DMA'
+    AND a.key = 'debug.block_count'
+)
+SELECT
+  bucket_start,
+  bucket_start + bucket_width - 1 AS bucket_end,
+  COUNT(*) AS n,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
+FROM block_counts
+GROUP BY bucket_start, bucket_width
+ORDER BY bucket_start;

@@ -222,6 +222,111 @@
       "id": 8191,
       "track": "Meta"
     },
+    "SD_STATUS_WAIT": {
+      "args": [
+        {
+          "description": "HAL_SD_CardStateType",
+          "enum": null,
+          "name": "status",
+          "type": "i32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved0",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved1",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved2",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "Status-poll wait for the SD transfer state, used to separate busy-card time from driver overhead.",
+      "id": 4614,
+      "track": "Storage"
+    },
+    "SD_WRITE_BLOCKS": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "start_block",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "block_count",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "0 == HAL_OK",
+          "enum": null,
+          "name": "hal_status",
+          "type": "i32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "HAL_SD_WriteBlocks_DMA() kicked off for the next SD write.",
+      "id": 4612,
+      "track": "Storage_DMA"
+    },
+    "SD_WRITE_CPLT": {
+      "args": [
+        {
+          "description": null,
+          "enum": null,
+          "name": "start_block",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "block_count",
+          "type": "u32",
+          "unit": null
+        },
+        {
+          "description": "HAL error code from the completed transfer",
+          "enum": null,
+          "name": "hal_status",
+          "type": "i32",
+          "unit": null
+        },
+        {
+          "description": null,
+          "enum": null,
+          "name": "reserved",
+          "type": "u32",
+          "unit": null
+        }
+      ],
+      "description": "HAL_SD_TxCpltCallback() fired after the DMA transfer completed.",
+      "id": 4613,
+      "track": "Storage_DMA"
+    },
     "VENC_DONE": {
       "args": [
         {
@@ -347,6 +452,12 @@
       "unit": "frames",
       "value": "bitstream_fill"
     },
+    "block_count": {
+      "event": "SD_WRITE_BLOCKS",
+      "type": "gauge",
+      "unit": "blocks",
+      "value": "block_count"
+    },
     "capture_backlog": {
       "event": "FRAME_CAPTURED",
       "type": "gauge",
@@ -417,15 +528,42 @@
       "unit": "us"
     }
   },
-  "schema_hash": 3875499551,
+  "schema_hash": 1373452329,
   "schema_version": 1,
   "slices": {
+    "DMA_WRITE": {
+      "begin": "SD_WRITE_BLOCKS",
+      "end": "SD_WRITE_CPLT",
+      "key": "start_block",
+      "name": "HAL_SD_WriteBlocks_DMA",
+      "track": "Storage_DMA"
+    },
     "SD_WRITE": {
       "begin": "FRAME_WRITE_BEGIN",
       "end": "FRAME_WRITTEN",
       "key": "frame_id",
       "name": "fx_file_write",
       "track": "Storage"
+    },
+    "SEMAPHORE_RX": {
+      "begin": "TX_SEMAPHORE_GET",
+      "end": "TX_SEMAPHORE_PUT",
+      "key": "semaphore_ptr",
+      "name": "rx semaphore GET -> PUT",
+      "track": "Semaphore RX",
+      "where": {
+        "semaphore_ptr_name": "sd rx transfer semaphore"
+      }
+    },
+    "SEMAPHORE_TX": {
+      "begin": "TX_SEMAPHORE_GET",
+      "end": "TX_SEMAPHORE_PUT",
+      "key": "semaphore_ptr",
+      "name": "tx semaphore GET -> PUT",
+      "track": "Semaphore TX",
+      "where": {
+        "semaphore_ptr_name": "sd tx transfer semaphore"
+      }
     },
     "VENC": {
       "begin": "VENC_SUBMITTED",

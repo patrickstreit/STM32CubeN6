@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from instrumentation.metrics import pair_events
-from instrumentation.model import CTX_INIT, CTX_ISR, NormalizedTrace
+from instrumentation.model import CTX_INIT, CTX_ISR, NormalizedEvent, NormalizedTrace
 from tracex import events as txev
 
 from .writer import UNIT_COUNT, PerfettoTraceWriter
@@ -51,6 +51,7 @@ class PerfettoExporter:
         self._next_tid += 1
 
         tracks = {e.definition.track for e in self.trace.events if e.definition is not None}
+        tracks.update(spec["track"] for spec in self.trace.schema.slices.values())
         for name in sorted(tracks):
             self._app_tracks[name] = self.writer.add_track(
                 name, description=self._track_description(name)
@@ -174,10 +175,9 @@ class PerfettoExporter:
 
     def _emit_app_events(self) -> None:
         schema = self.trace.schema
-        by_name: dict[str, list] = defaultdict(list)
+        by_name: dict[str, list[NormalizedEvent]] = defaultdict(list)
         for event in self.trace.events:
-            if event.is_app:
-                by_name[event.name].append(event)
+            by_name[event.name].append(event)
 
         # Events consumed by a slice definition are not also drawn as instants.
         slice_events: set[str] = set()
@@ -197,7 +197,9 @@ class PerfettoExporter:
             if track is None:
                 continue
             begin_name, end_name = spec["begin"], spec["end"]
-            for begin, end in pair_events(by_name, begin_name, end_name, spec["key"]):
+            for begin, end in pair_events(
+                by_name, begin_name, end_name, spec["key"], spec.get("where")
+            ):
                 fid = self._flow_id(begin.args.get(flow_key))
                 self.writer.slice_begin(
                     begin.ts_ns,

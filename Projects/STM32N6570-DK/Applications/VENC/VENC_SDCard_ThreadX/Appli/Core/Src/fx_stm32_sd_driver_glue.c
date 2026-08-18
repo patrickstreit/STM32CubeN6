@@ -11,9 +11,13 @@
 
 #include "fx_stm32_sd_driver.h"
 #include "main.h"
+#include "instrumentation.h"
 
 TX_SEMAPHORE sd_tx_semaphore;
 TX_SEMAPHORE sd_rx_semaphore;
+
+static volatile UINT sd_last_write_start_block = 0;
+static volatile UINT sd_last_write_block_count = 0;
 
 SD_HandleTypeDef hsd1;
 
@@ -93,10 +97,16 @@ INT fx_stm32_sd_get_status(UINT instance)
   UNUSED(instance);
   /* USER CODE END PRE_GET_STATUS */
 
-  if(HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
-  {
-    ret = 1;
-  }
+HAL_SD_CardStateTypeDef card_state = HAL_SD_GetCardState(&hsd1);
+ret = (card_state != HAL_SD_CARD_TRANSFER);
+if(ret)
+{
+  INSTR_EVENT(INSTR_ID_SD_STATUS_WAIT,
+          card_state,
+          0,
+          0,
+          0);
+}
 
   /* USER CODE BEGIN POST_GET_STATUS */
 
@@ -143,11 +153,22 @@ INT fx_stm32_sd_read_blocks(UINT instance, UINT *buffer, UINT start_block, UINT 
 INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT total_blocks)
 {
   INT ret = 0;
+  HAL_StatusTypeDef status = HAL_OK;
   /* USER CODE BEGIN PRE_WRITE_BLOCKS */
   UNUSED(instance);
   /* USER CODE END PRE_WRITE_BLOCKS */
 
-  if(HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks) != HAL_OK)
+  sd_last_write_start_block = start_block;
+  sd_last_write_block_count = total_blocks;
+
+  status = HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks);
+  INSTR_EVENT(INSTR_ID_SD_WRITE_BLOCKS,
+              start_block,
+              total_blocks,
+              (ULONG)(status),
+              0);
+
+  if(status != HAL_OK)
   {
     ret = 1;
   }
@@ -169,6 +190,12 @@ void HAL_SD_TxCpltCallback(SD_HandleTypeDef *hsd)
   /* USER CODE BEGIN PRE_TX_CMPLT */
 
   /* USER CODE END PRE_TX_CMPLT */
+
+  INSTR_EVENT(INSTR_ID_SD_WRITE_CPLT,
+              sd_last_write_start_block,
+              sd_last_write_block_count,
+              (ULONG)(hsd->ErrorCode),
+              0);
 
   tx_semaphore_put(&sd_tx_semaphore);
 
