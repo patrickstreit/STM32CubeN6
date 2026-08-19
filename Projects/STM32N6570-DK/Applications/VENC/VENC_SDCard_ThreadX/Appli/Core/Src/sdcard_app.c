@@ -66,6 +66,10 @@ void sdcard_thread_func(ULONG arg)
   /* Wait for the first I-frame. */
   do {
     res = VENC_APP_GetData(&data, &size);
+    if (res < 0)
+    {
+      tx_thread_sleep(15U*TX_TIMER_TICKS_PER_SECOND/1000U);
+    }
   }
   while (res != H264ENC_INTRA_FRAME);
   /* Ensure the very first frame written is the I-frame we just received */
@@ -115,7 +119,12 @@ void sdcard_thread_func(ULONG arg)
     res = VENC_APP_GetData(&data, &size);
     if (res < 0)
     {
-      printf("Failed to get encoded data\n");
+      VENC_APP_Status_t venc_status;
+      VENC_APP_GetStatus(&venc_status);
+      if (venc_status.state == VENC_APP_PIPELINE_RUNNING)
+      {
+        printf("Failed to get encoded data\n");
+      }
       tx_thread_sleep(15U*TX_TIMER_TICKS_PER_SECOND/1000U);
     }
     else

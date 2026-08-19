@@ -79,6 +79,9 @@ static uint32_t *g_curr_block = NULL;
 static uint32_t g_max_output_buffer_size = 0U;
 /* frame_id of the block handed out by the last VENC_APP_GetData() call */
 static uint32_t g_curr_frame_id = 0U;
+static volatile VENC_APP_PipelineState_t g_pipeline_state = VENC_APP_PIPELINE_STOPPED;
+static volatile UINT g_pipeline_last_status = TX_NOT_AVAILABLE;
+static volatile uint32_t g_venc_events_ready = 0U;
 
 /* Input Frame : in internal ram */
 venc_output_frame_t enc_queue_buf[VENC_APP_QUEUE_SIZE];
@@ -91,6 +94,8 @@ static int encoder_prepare(void);
 static int encode_frame(uint32_t frame_id);
 static int encoder_end(void);
 static int encoder_start(void);
+static UINT pipeline_start_internal(void);
+static UINT pipeline_stop_internal(void);
 
 static void invalidate_dcache_region(const void *addr, uint32_t size)
 {
@@ -160,6 +165,7 @@ void venc_thread_func(ULONG arg)
   {
     return ;
   }
+  g_venc_events_ready = 1U;
     
     if(tx_queue_create(&enc_frame_queue, "ENC frame queue", sizeof(venc_output_frame_t)/4, enc_queue_buf, sizeof(enc_queue_buf)) != TX_SUCCESS)
   {
@@ -199,36 +205,74 @@ void venc_thread_func(ULONG arg)
   
   /* Start the LCD, if present. */
   lcd_init();
-  
-  VENC_APP_EncodingStart();
+
+  printf("CTRL: pipeline stopped; use 'start' on COM1\n");
+  tx_event_flags_set(&venc_app_flags, VIDEO_STOPPED_FLAG, TX_OR);
   
  
   while(1)
   {
-    tx_event_flags_get(&venc_app_flags, VIDEO_START_FLAG, TX_AND, &flags, TX_WAIT_FOREVER);
-    if(BSP_CAMERA_BackgroundProcess() != BSP_ERROR_NONE)
+    tx_event_flags_get(&venc_app_flags, VIDEO_START_REQUEST_FLAG, TX_AND_CLEAR, &flags, TX_WAIT_FOREVER);
+
+    if (g_pipeline_state == VENC_APP_PIPELINE_RUNNING)
     {
-      printf("Error in BSP image processing\n");
+      continue;
     }
 
-    tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG, TX_AND_CLEAR, &flags, TX_WAIT_FOREVER);
-
-    /* Reuse the existing capture counter as the pipeline-wide correlation key. */
-    uint32_t frame_id = frame_received;
-
-    if (IsVideoOverflow())
+    g_pipeline_state = VENC_APP_PIPELINE_STARTING;
+    (void)tx_event_flags_get(&venc_app_flags, VIDEO_STOPPED_FLAG, TX_AND_CLEAR, &flags, TX_NO_WAIT);
+    g_pipeline_last_status = pipeline_start_internal();
+    if (g_pipeline_last_status != TX_SUCCESS)
     {
-      nbFrameSkip++;
-      INSTR_EVENT(INSTR_ID_FRAME_DROPPED, frame_id, nbFrameSkip, 1U /* CAPTURE_OVERFLOW */, 0U);
-      continue; 
+      g_pipeline_state = VENC_APP_PIPELINE_ERROR;
+      tx_event_flags_set(&venc_app_flags, VIDEO_STOPPED_FLAG, TX_OR);
+      printf("CTRL: pipeline start failed (%lu)\n", (unsigned long)g_pipeline_last_status);
+      continue;
     }
-    if(encode_frame(frame_id))
+
+    g_pipeline_state = VENC_APP_PIPELINE_RUNNING;
+    tx_event_flags_set(&venc_app_flags, VIDEO_START_FLAG, TX_OR);
+    printf("CTRL: pipeline running\n");
+
+    while (g_pipeline_state == VENC_APP_PIPELINE_RUNNING)
     {
-      printf("error encoding frame\n");
-    }
-    else
-    {
-      BSP_LED_Toggle(LED_GREEN);
+      if(BSP_CAMERA_BackgroundProcess() != BSP_ERROR_NONE)
+      {
+        printf("Error in BSP image processing\n");
+      }
+
+      tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG | VIDEO_STOP_REQUEST_FLAG, TX_OR_CLEAR, &flags, TX_WAIT_FOREVER);
+
+      if ((flags & VIDEO_STOP_REQUEST_FLAG) != 0U)
+      {
+        g_pipeline_state = VENC_APP_PIPELINE_STOPPING;
+        g_pipeline_last_status = pipeline_stop_internal();
+        g_pipeline_state = (g_pipeline_last_status == TX_SUCCESS) ? VENC_APP_PIPELINE_STOPPED : VENC_APP_PIPELINE_ERROR;
+        tx_event_flags_set(&venc_app_flags, VIDEO_STOPPED_FLAG, TX_OR);
+        printf("CTRL: pipeline %s\n", (g_pipeline_last_status == TX_SUCCESS) ? "stopped" : "stop failed");
+        break;
+      }
+
+      if ((flags & FRAME_RECEIVED_FLAG) != 0U)
+      {
+        /* Reuse the existing capture counter as the pipeline-wide correlation key. */
+        uint32_t frame_id = frame_received;
+
+        if (IsVideoOverflow())
+        {
+          nbFrameSkip++;
+          INSTR_EVENT(INSTR_ID_FRAME_DROPPED, frame_id, nbFrameSkip, 1U /* CAPTURE_OVERFLOW */, 0U);
+          continue; 
+        }
+        if(encode_frame(frame_id))
+        {
+          printf("error encoding frame\n");
+        }
+        else
+        {
+          BSP_LED_Toggle(LED_GREEN);
+        }
+      }
     }
   }
 }
@@ -346,6 +390,8 @@ static int encoder_start(void)
   ret = H264EncStrmStart(encoder, &encIn, &encOut);
   if (ret != H264ENC_OK)
   {
+    release_output_block(frame_buffer.block_addr);
+    BSP_CAMERA_Stop(0);
     return -1;
   }
   frame_buffer.size = encOut.streamSize;
@@ -516,6 +562,46 @@ static int encoder_end(void){
   return 0;
 }
 
+static UINT pipeline_start_internal(void)
+{
+  ULONG flags;
+
+  (void)tx_event_flags_get(&venc_app_flags,
+                           FRAME_RECEIVED_FLAG | VIDEO_STOP_REQUEST_FLAG | VIDEO_START_FLAG,
+                           TX_OR_CLEAR, &flags, TX_NO_WAIT);
+  frb_reset();
+  tx_queue_flush(&enc_frame_queue);
+  g_curr_block = NULL;
+  g_max_output_buffer_size = 0U;
+  frame_nb = 0U;
+  frame_received = 0U;
+  last_frame_received = 0U;
+  nbLineEvent = 0U;
+  nb_encoded_frame = 0U;
+
+  if (encoder_start())
+  {
+    return TX_NOT_DONE;
+  }
+  return TX_SUCCESS;
+}
+
+static UINT pipeline_stop_internal(void)
+{
+  UINT ret = TX_SUCCESS;
+  ULONG flags;
+
+  if (encoder_end())
+  {
+    ret = TX_NOT_DONE;
+  }
+  (void)tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG | VIDEO_START_FLAG, TX_OR_CLEAR, &flags, TX_NO_WAIT);
+  frb_reset();
+  tx_queue_flush(&enc_frame_queue);
+  g_curr_block = NULL;
+  return ret;
+}
+
 
 /**
  * @brief  Callback when a full camera frame is captured.
@@ -569,20 +655,21 @@ void BSP_CAMERA_LineEventCallback(uint32_t instance)
  *
  * This function initializes and starts the video encoding operation.
  */
-void VENC_APP_EncodingStart(void)
+UINT VENC_APP_EncodingStart(void)
 {
-  frb_reset();
-  tx_queue_flush(&enc_frame_queue);
-  g_curr_block = NULL;
-  g_max_output_buffer_size = 0U;
-  frame_nb = 0U;
-  frame_received = 0U;
-  last_frame_received = 0U;
-  nbLineEvent = 0U;
-  nb_encoded_frame = 0U;
-  /* initialize encoder software for camera feed encoding */
-  encoder_start();
-  tx_event_flags_set(&venc_app_flags, VIDEO_START_FLAG, TX_OR);
+  if (g_venc_events_ready == 0U)
+  {
+    return TX_NOT_AVAILABLE;
+  }
+  if ((g_pipeline_state == VENC_APP_PIPELINE_RUNNING) || (g_pipeline_state == VENC_APP_PIPELINE_STARTING))
+  {
+    return TX_SUCCESS;
+  }
+  if (tx_event_flags_set(&venc_app_flags, VIDEO_START_REQUEST_FLAG, TX_OR) != TX_SUCCESS)
+  {
+    return TX_NOT_DONE;
+  }
+  return TX_SUCCESS;
 }
 
 /**
@@ -601,13 +688,15 @@ INT VENC_APP_GetData(UCHAR **data, ULONG *size)
   UCHAR *frb_data;
   uint32_t frb_size;
   uint32_t timeStamp = 0U;
+  ULONG wait_option = (g_pipeline_state == VENC_APP_PIPELINE_RUNNING) ?
+                      (100U * TX_TIMER_TICKS_PER_SECOND / 1000U) : TX_NO_WAIT;
   if(g_curr_block)
   {
     frb_return_frame();
     g_curr_block = NULL;
   }
   venc_output_frame_t frame_block;
-  if(tx_queue_receive(&enc_frame_queue, (void *) &frame_block, TX_WAIT_FOREVER) != TX_SUCCESS)
+  if(tx_queue_receive(&enc_frame_queue, (void *) &frame_block, wait_option) != TX_SUCCESS)
   {
     *data = NULL;
     *size = 0;
@@ -644,11 +733,42 @@ uint32_t VENC_APP_GetFrameId(void)
  */
 UINT VENC_APP_EncodingStop(void)
 {
-  ULONG flags;
-  tx_event_flags_get(&venc_app_flags, VIDEO_START_FLAG, TX_AND_CLEAR, &flags, TX_WAIT_FOREVER);
-  (void) encoder_end();
-  frb_reset();
-  tx_queue_flush(&enc_frame_queue);
-  g_curr_block = NULL;
-   return(0);
+  if (g_venc_events_ready == 0U)
+  {
+    return TX_NOT_AVAILABLE;
+  }
+  if ((g_pipeline_state == VENC_APP_PIPELINE_STOPPED) || (g_pipeline_state == VENC_APP_PIPELINE_ERROR))
+  {
+    return TX_SUCCESS;
+  }
+  if (tx_event_flags_set(&venc_app_flags, VIDEO_STOP_REQUEST_FLAG, TX_OR) != TX_SUCCESS)
+  {
+    return TX_NOT_DONE;
+  }
+  return TX_SUCCESS;
+}
+
+void VENC_APP_GetStatus(VENC_APP_Status_t *status)
+{
+  if (status == NULL)
+  {
+    return;
+  }
+  status->state = g_pipeline_state;
+  status->frame_received = frame_received;
+  status->frame_encoded = nb_encoded_frame;
+  status->last_status = g_pipeline_last_status;
+}
+
+const char *VENC_APP_PipelineStateName(VENC_APP_PipelineState_t state)
+{
+  switch (state)
+  {
+    case VENC_APP_PIPELINE_STOPPED: return "stopped";
+    case VENC_APP_PIPELINE_STARTING: return "starting";
+    case VENC_APP_PIPELINE_RUNNING: return "running";
+    case VENC_APP_PIPELINE_STOPPING: return "stopping";
+    case VENC_APP_PIPELINE_ERROR: return "error";
+    default: return "unknown";
+  }
 }

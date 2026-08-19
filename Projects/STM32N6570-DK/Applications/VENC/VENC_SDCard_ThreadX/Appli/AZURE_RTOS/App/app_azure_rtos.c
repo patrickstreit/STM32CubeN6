@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 #include "main.h"
 #include "venc_app.h"
+#include "debug_control.h"
 #include "instrumentation.h"
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
@@ -47,6 +48,7 @@ TX_BYTE_POOL tx_app_byte_pool;
 
 TX_THREAD venc_thread;
 TX_THREAD sdcard_thread;
+TX_THREAD debug_control_thread;
 
 /* Private function prototypes -----------------------------------------------*/
 
@@ -57,6 +59,11 @@ __weak void venc_thread_func(ULONG arg)
 }
 
 __weak void sdcard_thread_func(ULONG arg)
+{
+  while(1);
+}
+
+__weak void debug_control_thread_func(ULONG arg)
 {
   while(1);
 }
@@ -114,6 +121,17 @@ VOID tx_application_define(VOID *first_unused_memory)
     /* Start the SDCard thread. */
     status = tx_thread_create(&sdcard_thread, "SDCard App Thread", sdcard_thread_func, 0,
                               thread_stack_pointer, 4000, 12, 12, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if(status != TX_SUCCESS)
+    {
+      Error_Handler();
+    }
+
+    if(tx_byte_allocate(&tx_app_byte_pool, &thread_stack_pointer, 2000, TX_NO_WAIT) != TX_SUCCESS){
+      Error_Handler();
+    }
+
+    status = tx_thread_create(&debug_control_thread, "Debug Control Thread", debug_control_thread_func, 0,
+                              thread_stack_pointer, 2000, 13, 13, TX_NO_TIME_SLICE, TX_AUTO_START);
     if(status != TX_SUCCESS)
     {
       Error_Handler();

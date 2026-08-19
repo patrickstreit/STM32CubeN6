@@ -25,11 +25,30 @@
 #include "stm32n6xx_hal.h"
 #include "tx_api.h"
 /* Exported types ------------------------------------------------------------*/
+typedef enum
+{
+  VENC_APP_PIPELINE_STOPPED = 0,
+  VENC_APP_PIPELINE_STARTING,
+  VENC_APP_PIPELINE_RUNNING,
+  VENC_APP_PIPELINE_STOPPING,
+  VENC_APP_PIPELINE_ERROR,
+} VENC_APP_PipelineState_t;
+
+typedef struct
+{
+  VENC_APP_PipelineState_t state;
+  uint32_t frame_received;
+  uint32_t frame_encoded;
+  UINT last_status;
+} VENC_APP_Status_t;
 
 /* Exported constants --------------------------------------------------------*/
 /* Event flags used by the video pipeline */
-#define FRAME_RECEIVED_FLAG   (1U << 0)
-#define VIDEO_START_FLAG      (1U << 1)
+#define FRAME_RECEIVED_FLAG        (1U << 0)
+#define VIDEO_START_FLAG           (1U << 1)
+#define VIDEO_START_REQUEST_FLAG   (1U << 2)
+#define VIDEO_STOP_REQUEST_FLAG    (1U << 3)
+#define VIDEO_STOPPED_FLAG         (1U << 4)
 
 /* Exported variables --------------------------------------------------------*/
 /**
@@ -54,9 +73,9 @@ void venc_thread_func(ULONG arg);
 
 /**
  * @brief  Start the video encoding pipeline.
- * @retval None
+ * @retval UINT ThreadX-style status
  */
-void VENC_APP_EncodingStart(void);
+UINT VENC_APP_EncodingStart(void);
 
 /**
  * @brief  Retrieve encoded data from the encoder.
@@ -78,4 +97,14 @@ uint32_t VENC_APP_GetFrameId(void);
  * @retval UINT Status code
  */
 UINT VENC_APP_EncodingStop(void);
+
+/**
+ * @brief  Get current pipeline state and counters.
+ */
+void VENC_APP_GetStatus(VENC_APP_Status_t *status);
+
+/**
+ * @brief  Convert a pipeline state to a printable string.
+ */
+const char *VENC_APP_PipelineStateName(VENC_APP_PipelineState_t state);
 #endif /* VENC_APP_H */

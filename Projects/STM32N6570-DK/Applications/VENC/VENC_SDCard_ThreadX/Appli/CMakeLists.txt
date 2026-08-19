@@ -87,6 +87,7 @@ set(APP_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_filex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_threadx.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_control.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/dcmipp_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/fx_stm32_sd_driver_glue.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/instrumentation.c
