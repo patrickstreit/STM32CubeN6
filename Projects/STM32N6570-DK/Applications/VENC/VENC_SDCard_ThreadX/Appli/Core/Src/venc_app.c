@@ -54,7 +54,7 @@ typedef struct {
 } venc_output_frame_t;
 /* Private define ------------------------------------------------------------*/
 /* Align and use unsigned suffixes for sizes/counts */
-#define VENC_APP_QUEUE_SIZE        15U
+#define VENC_APP_QUEUE_SIZE        30U
 #define VENC_OUTPUT_BLOCK_NBR      4U
 
 /* Private macro -------------------------------------------------------------*/

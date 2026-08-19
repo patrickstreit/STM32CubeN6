@@ -99,14 +99,14 @@ INT fx_stm32_sd_get_status(UINT instance)
 
 HAL_SD_CardStateTypeDef card_state = HAL_SD_GetCardState(&hsd1);
 ret = (card_state != HAL_SD_CARD_TRANSFER);
-if(ret)
-{
-  INSTR_EVENT(INSTR_ID_SD_STATUS_WAIT,
-          card_state,
-          0,
-          0,
-          0);
-}
+// if(ret)
+// {
+//   INSTR_EVENT(INSTR_ID_SD_STATUS_WAIT,
+//           card_state,
+//           0,
+//           0,
+//           0);
+// }
 
   /* USER CODE BEGIN POST_GET_STATUS */
 

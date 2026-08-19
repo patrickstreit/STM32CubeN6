@@ -9,6 +9,24 @@
 --   slice.dur        nanoseconds (-1 for instants)
 
 
+-- 0. basic argument filter
+SELECT
+  s.id,
+  s.ts,
+  MAX(CASE WHEN a.key = 'debug.queue_level'   THEN a.int_value END)  AS queue_level,
+  MAX(CASE WHEN a.key = 'debug.out_buf_size' THEN a.int_value END)  AS out_buf_size
+FROM slice s
+LEFT JOIN args a ON a.arg_set_id = s.arg_set_id
+WHERE s.name = 'encode'
+GROUP BY s.id
+ORDER BY s.ts;
+
+SELECT s.id, s.ts, MAX(CASE WHEN a.key = 'debug.out_buf_size' THEN a.int_value END) AS out_buf_size FROM slice s LEFT JOIN args a ON a.arg_set_id = s.arg_set_id WHERE s.name = 'encode' GROUP BY s.id ORDER BY out_buf_size;
+SELECT s.id, s.ts, MAX(CASE WHEN a.key = 'debug.out_buf_size' THEN a.int_value END) AS out_buf_size FROM slice s LEFT JOIN args a ON a.arg_set_id = s.arg_set_id WHERE s.name = 'encode' GROUP BY s.id ORDER BY out_buf_size;
+
+
+
+
 -- ---------------------------------------------------------------------------
 -- 1. Slowest SD writes, with frame and payload size attached
 -- ---------------------------------------------------------------------------
@@ -48,6 +66,7 @@ rot AS (
   SELECT ts FROM slice WHERE name = 'FILE_ROTATED'
 )
 SELECT
+  slow.id,
   slow.ts,
   slow.dur / 1e6                                             AS dur_ms,
   (SELECT MIN(ABS(slow.ts - rot.ts)) FROM rot) / 1e6         AS ms_to_nearest_rotation

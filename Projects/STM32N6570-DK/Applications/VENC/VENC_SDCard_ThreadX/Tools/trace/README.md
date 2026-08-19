@@ -276,7 +276,7 @@ from `_tx_thread_schedule` — deliberately not done.
 
 ---
 
-## 7. Measured baseline (720p30 + SD recording, 86 s capture)
+## 7. Current status (720p30 + SD recording)
 
 | Property | Value |
 | --- | --- |
@@ -285,35 +285,51 @@ from `_tx_thread_schedule` — deliberately not done.
 | Trace clock | `DWT->CYCCNT` @ 800 MHz, wraps ≈5.37 s |
 | Event rate | ≈1'140 /s → **86 s of history** |
 | SWD upload | ≈8 s for 3 MiB |
+| Encoded-frame queue | 30 entries (`VENC_APP_QUEUE_SIZE`) |
+| Output-ring capacity | 1.8 MiB (`out_buffer_size`) |
 
-| Producer | Rate | Share |
-| --- | --- | --- |
-| `TX_THREAD_RESUME` | 467 /s | 40.9 % |
-| `TX_THREAD_SUSPEND` | 467 /s | 40.9 % |
-| all application events combined | ≈130 /s | **11 %** |
+The queue was raised from 15 to 30 entries to absorb the file-rotation stall
+without changing the rotation path first. A current trace had 1.5 MiB remaining in
+the output ring. With 15 queue entries, it was 1.8 MiB. Both use well below the 2MB capacity. This is encouraging but not a
+capacity proof: repeat it across longer runs, with more moving images, leave margin for fature higher bitrates and retain a margin for the
+observed VENC failures below.
 
-`TX_TRACE_INTERNAL_EVENTS` is 82 % of the ring but is kept: it is the only
-source for the thread timeline, and 86 s is ample. Drop it first if longer
-history is ever needed (→ roughly 8 minutes).
+The generated H.264 files are usable: VLC plays a stream converted with
+FFmpeg. A filmed on-screen timer also indicates frame periods within about
+plus/minus 2 ms. Treat that timing result as indicative only; the Python timer
+measurement itself has not been calibrated.
 
-**Adding application events is cheap** — they cost 11 % of the ring today.
+### Write behaviour after the alignment and cache fixes
 
-### Pipeline behaviour observed
+The former long write tail is no longer concentrated at file rotation. Normal
+runs show roughly 75 ms writes periodically, every 2.5 to 3.5 s. Much longer
+writes occur at application startup and when the debugger halts the target to
+read the trace; exclude those debugger-induced samples from storage analysis.
 
-```
-venc_duration        mean  23.7 ms   p99  24.7 ms   max   209.8 ms
-write_duration       mean  25.1 ms   p99 380.4 ms   max  1831.0 ms   ← stalls
-capture_to_written   mean 200.3 ms   p99   1.74 s   max     2.55 s
-venc_queue_level     high-watermark 16   (capacity 15 → saturated)
-capture_backlog      high-watermark 39
-frames captured 2'463 → encoded 2'198, dropped 17
-```
+The startup write behaviour is worth a separate pass later. File `0000.h264`
+is currently faulty, so startup/first-file handling is not yet clean. Do not
+conflate this with the periodic writes or the debugger artifacts.
 
-The SD write path is the bottleneck; its stalls back-pressure the encoder,
-which is why `captured` exceeds `encoded`.
+### Scheduling and rotation state
 
-> The `write_duration` figures above are the **pre-fix** baseline. See §8 for
-> what changed and the current numbers.
+`venc_thread` and `sdcard_thread` currently both run at priority 12 with
+preemption threshold 12 and `TX_NO_TIME_SLICE`. The earlier experiment that
+gave VENC priority 11 is not present. Neither is `VENC_FileX_PrepareNext()` /
+`ActivatePrepared()` preallocation; file allocation still happens in the
+ordinary rotation path.
+
+The larger queue is deliberately the only rotation mitigation at this point.
+Leave priorities and preallocation unchanged until traces demonstrate that the
+remaining rotation behaviour needs them.
+
+### Separate VENC reliability issue
+
+Some runs showed `FRB overflow (fr)` / `error encoding frame` on the VCP and
+`VENC_PENDING` / `VENC_ERROR` in the trace. Breakpoints and debugger halts may
+be involved, but that has not been established. Treat it as a separate issue:
+first reproduce without breakpoints, preserve the corresponding `.trx` and VCP
+log, then compare queue level, output-ring occupancy, frame id continuity, and
+the preceding VENC events. Do not claim that the queue change caused it.
 
 ---
 
@@ -350,7 +366,7 @@ sdcard_app.c            VENC_FileX_write()
 | # | Hypothesis | Verdict |
 | --- | --- | --- |
 | H1 | Card-internal busy (wear levelling / erase) | **partly confirmed** — accounts for the remaining outliers only |
-| H2 | `check_sd_status()` polling before the write | not observed |
+| H2 | `check_sd_status()` polling after DMA completion | **observed** — the card often remains in `HAL_SD_CARD_PROGRAMMING`, so the driver polls until it returns to `TRANSFER` |
 | H3 | Unaligned buffer → per-sector loop | **confirmed, dominant** |
 | H4 | `fx_media_flush()` on file rotation | not the cause of the bulk cost; rotation is a separate problem, see §9 |
 | H5 | Lost IRQ / DMA stall | not observed |
@@ -401,8 +417,8 @@ Stopped here: the remaining ≈0.8 single-block writes per frame are the sector
 straddling two frames, which must be written at least once. Eliminating it
 requires 512-byte-aligned writes — either a ~128 KB accumulation buffer in
 `VENC_FileX_write()` or padding every frame to a 512 multiple (+4 % file size).
-Estimated further gain ≈2 s of ≈4 s DMA time. Judged not worth it against the
-rotation problem in §9.
+Estimated further gain ≈2 s of ≈4 s DMA time. It is not the current priority
+while rotation has queue headroom and VENC reliability remains unverified.
 
 The `max` column is card-internal garbage collection (H1) and is unaffected by
 any of this.
@@ -431,32 +447,26 @@ any of this.
 
 ---
 
-## 9. Next task — the stall at file rotation
+## 9. Next investigation
 
-Not investigated yet. Observed after the §8 fixes, from the same traces:
-
-- `venc_queue_level` saturates during file rotation.
-- The `encode` slice stops for the duration.
-- Many `TX_SEMAPHORE_GET`/`PUT` on the **rx** semaphore, none on the **tx**
-  semaphore, in that window.
-- `max fx_file_write` is still 570 ms; check whether those outliers cluster
-  around `FILE_ROTATED` (query 3 in the snippets file) or are spread out — the
-  latter would confirm they are card garbage collection and unrelated.
-
-Unverified starting points, from earlier work on this project and **not**
-re-checked in this session:
-
-- `venc_thread` was given a higher priority (11) than `sdcard_thread` (12)
-  because ThreadX does not round-robin equal-priority threads without a time
-  slice.
-- A double-buffered `FX_FILE` preallocation
-  (`VENC_FileX_PrepareNext` / `ActivatePrepared`) was added so that the slow
-  `fx_file_extended_best_effort_allocate()` cluster search runs ahead of the
-  rotation rather than during it.
-
-Confirm both are actually present and effective before drawing conclusions.
-The rx-semaphore-without-tx-semaphore pattern suggests the writer thread is
-blocked on something other than a write completion; identify what holds it.
+1. Reproduce `FRB overflow` / VENC pending/error without debugger stops. Save
+   the raw trace and serial log together; classify failures before changing
+   queue sizes, priorities, or buffer allocation.
+2. Characterise the periodic 75 ms writes with B1, B4, B7 and the
+   `FILE_ROTATED` correlation query. Establish whether they are card-internal
+  busy time, a FileX operation, or rotation-related. The DMA completion can be
+  followed by repeated `check_sd_status()` polls while the card is in
+  `HAL_SD_CARD_PROGRAMMING`; optimise that wait only after the higher-priority
+  VENC and first-file issues. `SD_STATUS_WAIT` instrumentation is deliberately
+  disabled because its high event rate made the TraceX history too short to be
+  useful.
+3. Investigate first-file startup separately: why `0000.h264` is invalid and
+   which startup operation produces the long write. The initial I-frame wait
+   in `sdcard_app.c` is a useful starting point.
+4. Only if rotation still exhausts the 30-entry queue in uninterrupted runs,
+   reconsider VENC priority 11 versus SD priority 12 and/or preallocating the
+   next `FX_FILE`. Equal-priority `TX_NO_TIME_SLICE` threads cannot round-robin
+   through a CPU-bound FileX allocation.
 
 ---
 
