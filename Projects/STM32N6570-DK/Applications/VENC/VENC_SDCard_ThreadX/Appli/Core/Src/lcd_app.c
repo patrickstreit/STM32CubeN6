@@ -40,7 +40,7 @@ uint8_t lcd_frame[LCD_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 
 /* Private function prototypes -----------------------------------------------*/
 extern DCMIPP_HandleTypeDef hcamera_dcmipp;
-/* IMX335 : CAMERA_R2592x1944, CAMERA_PF_RAW_RGGB10*/ 
+/* CSI-2 input from external Lattice CrossLink: RAW10, VC0, 1920x1080 */
 extern cam_h264_cfg_t hCamH264Instance;
 
 HAL_StatusTypeDef  dcmipp_downsize(DCMIPP_HandleTypeDef *hdcmipp,int32_t pipe, int32_t camWidth,int32_t camHeight,int32_t captureWidth,int32_t captureHeight);

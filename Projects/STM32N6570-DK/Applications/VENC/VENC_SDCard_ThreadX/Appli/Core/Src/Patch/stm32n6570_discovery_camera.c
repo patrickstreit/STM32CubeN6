@@ -199,118 +199,56 @@ static int32_t IMX335_Probe(uint32_t Resolution, uint32_t PixelFormat);
 int32_t BSP_CAMERA_Init(uint32_t Instance, uint32_t Resolution, uint32_t PixelFormat)
 {
   int32_t ret = BSP_ERROR_NONE;
-  ISP_AppliHelpersTypeDef appliHelpers = {0};
-  static const ISP_IQParamTypeDef* ISP_IQParamCacheInit[] = {
-    &ISP_IQParamCacheInit_IMX335
-   };
+
   if (Instance >= CAMERA_INSTANCES_NBR)
   {
     ret = BSP_ERROR_WRONG_PARAM;
   }
   else
   {
-    if ((PixelFormat != CAMERA_PF_RAW_RGGB10) || (Resolution != CAMERA_R2592x1944))
-    {
-      ret = BSP_ERROR_WRONG_PARAM;
-    }
+    /* No sensor is present/driven on this board: the MIPI CSI-2 stream (RAW10,
+       VC0, 4 lanes) is generated externally by a Lattice CrossLink and is
+       expected to already be running. Only the DCMIPP/CSI receiver is
+       configured here; no I2C sensor probe, reset or ISP (AE/AWB) control. */
+    Camera_Ctx[Instance].Resolution = Resolution;
+    Camera_Ctx[Instance].PixelFormat = PixelFormat;
 
+    /* Set DCMIPP instance */
+    hcamera_dcmipp.Instance = DCMIPP;
+
+#if (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0)
+    /* Register the DCMIPP MSP Callbacks */
+    if (Camera_Ctx[Instance].IsMspCallbacksValid == 0U)
+    {
+      if (BSP_CAMERA_RegisterDefaultMspCallbacks(Instance) != BSP_ERROR_NONE)
+      {
+        return BSP_ERROR_MSP_FAILURE;
+      }
+    }
+#else
+    /* DCMIPP Initialization */
+    DCMIPP_MspInit(&hcamera_dcmipp);
+#endif /* USE_HAL_DCMIPP_REGISTER_CALLBACKS */
+
+    if (MX_DCMIPP_ClockConfig(&hcamera_dcmipp) != HAL_OK)
+    {
+      ret = BSP_ERROR_PERIPH_FAILURE;
+    }
+    /* Power-enable/reset of the physical camera connector (GPIO only, no I2C).
+       The CrossLink module sits on this same connector; without asserting
+       EN_CAM/NRST_CAM its 2V8 rail and D-PHY lines never come up, so the STM32
+       CSI-2 RX would never see any HS/clock activity from it. */
+    else if (BSP_CAMERA_HwReset(0) != BSP_ERROR_NONE)
+    {
+      ret = BSP_ERROR_BUS_FAILURE;
+    }
+    else if (MX_DCMIPP_Init(&hcamera_dcmipp) != HAL_OK)
+    {
+      ret = BSP_ERROR_PERIPH_FAILURE;
+    }
     else
     {
-      /* Check if another instance was Initialized */
-      Camera_Ctx[Instance].Resolution = Resolution;
-      Camera_Ctx[Instance].PixelFormat = PixelFormat;
-
-      /* Set DCMIPP instance */
-      hcamera_dcmipp.Instance = DCMIPP;
-
-      /* DCMIPP Initialization */
-#if (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0)
-      /* Register the DCMIPP MSP Callbacks */
-      if (Camera_Ctx[Instance].IsMspCallbacksValid == 0U)
-      {
-        if (BSP_CAMERA_RegisterDefaultMspCallbacks(Instance) != BSP_ERROR_NONE)
-        {
-          return BSP_ERROR_MSP_FAILURE;
-        }
-      }
-#else
-      /* DCMIPP Initialization */
-      DCMIPP_MspInit(&hcamera_dcmipp);
-#endif /* USE_HAL_DCMIPP_REGISTER_CALLBACKS */
-      if(MX_DCMIPP_ClockConfig(&hcamera_dcmipp) != HAL_OK)
-      {
-        ret = BSP_ERROR_PERIPH_FAILURE;
-      }
-      else if (BSP_CAMERA_HwReset(0) != BSP_ERROR_NONE)
-      {
-        ret = BSP_ERROR_BUS_FAILURE;
-      }
-      else
-      {
-        /* No action */
-      }
-
-      if(ret == BSP_ERROR_NONE)
-      {
-        if (MX_DCMIPP_Init(&hcamera_dcmipp) != HAL_OK)
-        {
-          ret = BSP_ERROR_PERIPH_FAILURE;
-        }
-        else
-        {
-          if (IMX335_Probe(Resolution, PixelFormat) != BSP_ERROR_NONE)
-          {
-            ret = BSP_ERROR_UNKNOWN_COMPONENT;
-          }
-          else
-          {
-#if (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0)
-            /* Register DCMIPP LineEvent, FrameEvent and Error callbacks */
-            if (HAL_DCMIPP_PIPE_RegisterCallback(&hcamera_dcmipp, HAL_DCMIPP_PIPE_LINE_EVENT_CB_ID, DCMIPP_PIPE_LineEventCallback) != HAL_OK)
-            {
-              ret = BSP_ERROR_PERIPH_FAILURE;
-            }
-            else if (HAL_DCMIPP_PIPE_RegisterCallback(&hcamera_dcmipp, HAL_DCMIPP_PIPE_FRAME_EVENT_CB_ID, DCMIPP_PIPE_FrameEventCallback) != HAL_OK)
-            {
-              ret = BSP_ERROR_PERIPH_FAILURE;
-            }
-            else if (HAL_DCMIPP_PIPE_RegisterCallback(&hcamera_dcmipp, HAL_DCMIPP_PIPE_VSYNC_EVENT_CB_ID, DCMIPP_PIPE_VsyncEventCallback) != HAL_OK)
-            {
-              ret = BSP_ERROR_PERIPH_FAILURE;
-            }
-            else if (HAL_DCMIPP_PIPE_RegisterCallback(&hcamera_dcmipp, HAL_DCMIPP_PIPE_ERROR_CB_ID, DCMIPP_PIPE_ErrorCallback) != HAL_OK)
-            {
-              ret = BSP_ERROR_PERIPH_FAILURE;
-            }
-            else if (HAL_DCMIPP_RegisterCallback(&hcamera_dcmipp, HAL_DCMIPP_ERROR_CB_ID, DCMIPP_ErrorCallback) != HAL_OK)
-            {
-              ret = BSP_ERROR_PERIPH_FAILURE;
-            }
-            else
-            {
-#endif /* (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0) */
-              /* Fill init struct with Camera driver helpers */
-              appliHelpers.GetSensorInfo = BSP_GetSensorInfoHelper;
-              appliHelpers.SetSensorGain = BSP_SetSensorGainHelper;
-              appliHelpers.GetSensorGain = BSP_GetSensorGainHelper;
-              appliHelpers.SetSensorExposure = BSP_SetSensorExposureHelper;
-              appliHelpers.GetSensorExposure = BSP_GetSensorExposureHelper;
-
-              /* Initialize the Image Signal Processing middleware */
-              if(ISP_Init(&hcamera_isp, &hcamera_dcmipp, 0, &appliHelpers, ISP_IQParamCacheInit[0]) != ISP_OK)
-              {
-                ret = BSP_ERROR_PERIPH_FAILURE;
-              }
-              else
-              {
-                ret = BSP_ERROR_NONE;
-              }
-#if (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0)
-            }
-#endif /* (USE_HAL_DCMIPP_REGISTER_CALLBACKS > 0) */
-          }
-        }
-      }
+      ret = BSP_ERROR_NONE;
     }
   }
 
@@ -500,7 +438,7 @@ int32_t BSP_CAMERA_RegisterMspCallbacks(uint32_t Instance, BSP_CAMERA_Cb_t *Call
 {
   int32_t ret = BSP_ERROR_NONE;
 
-  if (Instance >= CAMERA_INSTANCES_NBR)
+  if (BCES_NBR)
   {
     ret = BSP_ERROR_WRONG_PARAM;
   }
@@ -1747,10 +1685,8 @@ void HAL_DCMIPP_PIPE_VsyncEventCallback(DCMIPP_HandleTypeDef *hdcmipp, uint32_t 
   UNUSED(hdcmipp);
   UNUSED(Pipe);
 
-  /* Update the frame counter and call the ISP statistics handler */
-  ISP_IncMainFrameId(&hcamera_isp);
-  ISP_GatherStatistics(&hcamera_isp);
-  ISP_OutputMeta(&hcamera_isp);
+  /* ISP middleware is not used: no sensor is driven, so there is no gain/exposure
+     to compute statistics for. Skip the ISP statistics handler entirely. */
 
   BSP_CAMERA_VsyncEventCallback(0);
 }

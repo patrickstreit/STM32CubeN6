@@ -23,7 +23,6 @@
 #include "ewl.h"
 #include "h264encapi.h"
 #include "venc_app.h"
-#include "imx335.h"
 #include "stm32n6xx_ll_venc.h"
 #include "stm32n6570_discovery.h"
 #include "stm32n6570_discovery_camera.h"
@@ -119,6 +118,45 @@ static void release_output_block(uint32_t *block_addr)
   (void)block_addr;
   frb_free(0xFFFFFFFFU);
 }
+
+/**
+ * @brief  Dump and clear the CSI-2 host status registers (SR0/SR1).
+ * @note   HAL_DCMIPP_Error/PipeErrorCallback only cover DCMIPP AXI/pipe-overrun
+ *         errors; CSI-2 protocol/D-PHY errors (lane sync, CRC, ECC, watchdog)
+ *         only show up here and are never routed through those callbacks.
+ */
+static void csi_dump_status(void)
+{
+  uint32_t sr0 = CSI->SR0;
+  uint32_t sr1 = CSI->SR1;
+
+  printf("CSI SR0=0x%08lx SR1=0x%08lx frames=%lu", (unsigned long)sr0, (unsigned long)sr1,
+         (unsigned long)frame_received);
+  if (sr0 & CSI_SR0_SOF0F)     printf(" SOF0");
+  if (sr0 & CSI_SR0_EOF0F)     printf(" EOF0");
+  if (sr0 & CSI_SR0_SYNCERRF)  printf(" SYNCERR");
+  if (sr0 & CSI_SR0_CRCERRF)   printf(" CRCERR");
+  if (sr0 & CSI_SR0_ECCERRF)   printf(" ECCERR(uncorrectable)");
+  if (sr0 & CSI_SR0_CECCERRF)  printf(" CECCERR(corrected)");
+  if (sr0 & CSI_SR0_IDERRF)    printf(" IDERR(wrong DT)");
+  if (sr0 & CSI_SR0_WDERRF)    printf(" WDERR(no data/timeout)");
+  if (sr0 & CSI_SR0_SPKTF)     printf(" SPKT");
+  if (sr1 & CSI_SR1_ACTCLF)       printf(" ACT_CLK");
+  if (sr1 & CSI_SR1_ACTDL0F)      printf(" ACT_L0");
+  if (sr1 & CSI_SR1_ACTDL1F)      printf(" ACT_L1");
+  if (sr1 & CSI_SR1_SYNCDL0F)     printf(" SYNC_L0");
+  if (sr1 & CSI_SR1_SYNCDL1F)     printf(" SYNC_L1");
+  if (sr1 & CSI_SR1_ESOTDL0F)     printf(" ESOT_L0(bitrate?)");
+  if (sr1 & CSI_SR1_ESOTSYNCDL0F) printf(" ESOTSYNC_L0(bitrate?)");
+  if (sr1 & CSI_SR1_ESOTDL1F)     printf(" ESOT_L1(bitrate?)");
+  if (sr1 & CSI_SR1_ESOTSYNCDL1F) printf(" ESOTSYNC_L1(bitrate?)");
+  if (sr0 == 0U && sr1 == 0U)  printf(" (nothing ever received on the CSI-2 lanes)");
+  printf("\n");
+
+  /* Flag-clear registers mirror the status bit positions */
+  CSI->FCR0 = sr0;
+  CSI->FCR1 = sr1;
+}
 /**
   * @brief  Checks if a video buffer overflow condition has occurred.
   * @note   This function is typically used to monitor the video streaming process
@@ -182,14 +220,14 @@ void venc_thread_func(ULONG arg)
     Error_Handler();
   }
 
-   /* Initialize camera */
-  if(BSP_CAMERA_Init(0,CAMERA_R2592x1944, CAMERA_PF_RAW_RGGB10) != BSP_ERROR_NONE)
+  /* Initialize the DCMIPP/CSI receiver only. No sensor is driven from the STM32:
+     the MIPI CSI-2 stream (RAW10, VC0, 4 lanes, ~1485 Mbit/s/lane) is generated
+     externally by a Lattice CrossLink and is assumed to already be running. */
+  if(BSP_CAMERA_Init(0, 0, 0) != BSP_ERROR_NONE)
   {
     Error_Handler();
   }
 
-  IMX335_SetFramerate(Camera_CompObj, hVencH264Instance.cfgH264Main.frameRateNum /hVencH264Instance.cfgH264Main.frameRateDenom);
-  
   /* initialize VENC */
   LL_VENC_Init();
 
@@ -236,12 +274,14 @@ void venc_thread_func(ULONG arg)
 
     while (g_pipeline_state == VENC_APP_PIPELINE_RUNNING)
     {
-      if(BSP_CAMERA_BackgroundProcess() != BSP_ERROR_NONE)
+      UINT wait_ret = tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG | VIDEO_STOP_REQUEST_FLAG, TX_OR_CLEAR,
+                                          &flags, 1U * TX_TIMER_TICKS_PER_SECOND);
+      if (wait_ret != TX_SUCCESS)
       {
-        printf("Error in BSP image processing\n");
+        /* No frame in 1s: dump CSI-2 status to see whether anything is arriving at all. */
+        csi_dump_status();
+        continue;
       }
-
-      tx_event_flags_get(&venc_app_flags, FRAME_RECEIVED_FLAG | VIDEO_STOP_REQUEST_FLAG, TX_OR_CLEAR, &flags, TX_WAIT_FOREVER);
 
       if ((flags & VIDEO_STOP_REQUEST_FLAG) != 0U)
       {
@@ -648,6 +688,53 @@ void BSP_CAMERA_LineEventCallback(uint32_t instance)
 {
   /* signal new frame*/
  nbLineEvent++;
+}
+
+/**
+ * @brief  Print the human-readable HAL_DCMIPP_(CSI_)ERROR_* bits of an ErrorCode.
+ */
+static void print_dcmipp_error_code(uint32_t err)
+{
+  if (err & HAL_DCMIPP_ERROR_AXI_TRANSFER)  printf(" AXI_TRANSFER");
+  if (err & HAL_DCMIPP_ERROR_PARALLEL_SYNC) printf(" PARALLEL_SYNC");
+  if (err & HAL_DCMIPP_ERROR_PIPE0_LIMIT)   printf(" PIPE0_LIMIT");
+  if (err & HAL_DCMIPP_ERROR_PIPE0_OVR)     printf(" PIPE0_OVR");
+  if (err & HAL_DCMIPP_ERROR_PIPE1_OVR)     printf(" PIPE1_OVR");
+  if (err & HAL_DCMIPP_ERROR_PIPE2_OVR)     printf(" PIPE2_OVR");
+  if (err & HAL_DCMIPP_CSI_ERROR_SYNC)         printf(" CSI_SYNC");
+  if (err & HAL_DCMIPP_CSI_ERROR_WDG)          printf(" CSI_WDG(no data)");
+  if (err & HAL_DCMIPP_CSI_ERROR_SPKT)         printf(" CSI_SPKT");
+  if (err & HAL_DCMIPP_CSI_ERROR_DATA_ID)      printf(" CSI_DATA_ID(wrong DT)");
+  if (err & HAL_DCMIPP_CSI_ERROR_CECC)         printf(" CSI_CECC(corrected)");
+  if (err & HAL_DCMIPP_CSI_ERROR_ECC)          printf(" CSI_ECC(uncorrectable)");
+  if (err & HAL_DCMIPP_CSI_ERROR_CRC)          printf(" CSI_CRC");
+  if (err & HAL_DCMIPP_CSI_ERROR_DPHY_CTRL)    printf(" DPHY_CTRL(illegal ctrl code)");
+  if (err & HAL_DCMIPP_CSI_ERROR_DPHY_LP_SYNC) printf(" DPHY_LP_SYNC");
+  if (err & HAL_DCMIPP_CSI_ERROR_DPHY_ESCAPE)  printf(" DPHY_ESCAPE");
+  if (err & HAL_DCMIPP_CSI_ERROR_SOT_SYNC)     printf(" DPHY_SOT_SYNC(bitrate/skew?)");
+  if (err & HAL_DCMIPP_CSI_ERROR_SOT)          printf(" DPHY_SOT(bitrate/skew?)");
+}
+
+/**
+ * @brief  Called on DCMIPP pipe error (overrun, limit, sync loss, ...).
+ * @param  Instance DCMIPP pipe index.
+ */
+void BSP_CAMERA_PipeErrorCallback(uint32_t Instance)
+{
+  printf("DCMIPP PIPE%lu error, ErrorCode=0x%08lx", (unsigned long)Instance, (unsigned long)hcamera_dcmipp.ErrorCode);
+  print_dcmipp_error_code(hcamera_dcmipp.ErrorCode);
+  printf("\n");
+}
+
+/**
+ * @brief  Called on global DCMIPP/CSI error (AXI transfer, parallel sync, ...).
+ * @param  Instance Camera instance (always 0, single DCMIPP instance).
+ */
+void BSP_CAMERA_ErrorCallback(uint32_t Instance)
+{
+  printf("DCMIPP global error, ErrorCode=0x%08lx", (unsigned long)hcamera_dcmipp.ErrorCode);
+  print_dcmipp_error_code(hcamera_dcmipp.ErrorCode);
+  printf("\n");
 }
 
 /**

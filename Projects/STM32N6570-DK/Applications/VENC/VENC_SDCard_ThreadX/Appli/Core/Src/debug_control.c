@@ -3,7 +3,9 @@
 #include "stm32n6570_discovery.h"
 #include "string.h"
 #include "stdio.h"
+#include "stdlib.h"
 #include "venc_app.h"
+#include "dcmipp_app.h"
 
 #define DEBUG_CONTROL_LINE_SIZE 32U
 
@@ -24,11 +26,25 @@ static void handle_command(char *line)
 {
   if ((strcmp(line, "help") == 0) || (strcmp(line, "?") == 0))
   {
-    printf("CTRL: commands: status, start, stop, help\n");
+    printf("CTRL: commands: status, start, stop, phy <mbps>, help\n");
   }
   else if (strcmp(line, "status") == 0)
   {
     print_status();
+  }
+  else if (strncmp(line, "phy ", 4) == 0)
+  {
+    VENC_APP_Status_t status;
+    VENC_APP_GetStatus(&status);
+    if (status.state != VENC_APP_PIPELINE_STOPPED)
+    {
+      printf("CTRL: 'stop' the pipeline before changing the CSI PHY bitrate\n");
+    }
+    else
+    {
+      uint32_t applied = dcmipp_set_csi_phy_bitrate((uint32_t)atoi(&line[4]));
+      printf("CTRL: CSI PHY bitrate set to %lu Mbit/s\n", (unsigned long)applied);
+    }
   }
   else if (strcmp(line, "start") == 0)
   {

@@ -107,10 +107,10 @@ uint8_t ewl_pool[VENC_POOL_SIZE] ALIGN_32 VENC_BUFFER_LOCATION;
 uint8_t h264_bitstream[VENC_OUTPUT_BUFFER_SIZE] ALIGN_32 __NON_CACHEABLE;
 
 
-/* IMX335 : CAMERA_R2592x1944, CAMERA_PF_RAW_RGGB10*/ 
+/* CSI-2 input from external Lattice CrossLink (RAW10, VC0, 4 lanes) : 1920x1080 */
 cam_h264_cfg_t hCamH264Instance  ={
-  .width  = 2592,
-  .height = 1944,
+  .width  = 1920,
+  .height = 1080,
 };
 
 dcmipp_h264_cfg_t hDcmippH264Instance={

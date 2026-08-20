@@ -57,10 +57,13 @@ HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
     return HAL_ERROR;
   }
 
-  /* Configure the CSI */
+  /* Configure the CSI : external CrossLink source, 2 lanes, ~1250 Mbit/s/lane.
+     NOTE: the STM32N6 DCMIPP/CSI-2 D-PHY receiver only supports 2 data lanes
+     (HAL only defines DCMIPP_CSI_TWO_DATA_LANES; there is no 4-lane HAL value/register
+     encoding). Requested 4 lanes could not be configured; kept at 2 lanes - see report. */
   csiconf.DataLaneMapping = DCMIPP_CSI_PHYSICAL_DATA_LANES;
   csiconf.NumberOfLanes   = DCMIPP_CSI_TWO_DATA_LANES;
-  csiconf.PHYBitrate      = DCMIPP_CSI_PHY_BT_1600;
+  csiconf.PHYBitrate      = DCMIPP_CSI_PHY_BT_1250;
   HAL_DCMIPP_CSI_SetConfig(hdcmipp, &csiconf);
 
   /* Configure the Virtual Channel 0 */
@@ -79,7 +82,7 @@ HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
     return HAL_ERROR;
   }
 
-   pPipeConf.FrameRate  = DCMIPP_FRAME_RATE_ALL;  /* Sensor framerate is set with IMX335_SetFramerate(..FRAMERATE);*/
+   pPipeConf.FrameRate  = DCMIPP_FRAME_RATE_ALL;  /* Framerate is dictated by the externally-running CrossLink/CSI-2 stream */
    pPipeConf.PixelPackerFormat = hDcmippH264Instance.format;
 
   /* Set Pitch for Main and Ancillary Pipes */
@@ -94,6 +97,28 @@ HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
   {
     return HAL_ERROR;
   }
+
+  /* RAW Bayer -> RGB demosaic (pure DCMIPP hardware block, no sensor/I2C access).
+     This was previously configured by the ISP middleware (ISP_Start -> P1DMCR);
+     it is mandatory ahead of the YUV conversion below, else the Bayer mosaic is
+     never resolved and no valid image is produced. Bayer pattern assumed RGGB
+     (same as the previous IMX335 config) - adjust if the CrossLink output differs. */
+  DCMIPP_RawBayer2RGBConfTypeDef bayer_conf = {
+    .RawBayerType  = DCMIPP_RAWBAYER_RGGB,
+    .PeakStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_4,
+    .VLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
+    .HLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
+    .EdgeStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_16,
+  };
+  if (HAL_DCMIPP_PIPE_SetISPRawBayer2RGBConfig(hdcmipp, DCMIPP_PIPE1, &bayer_conf) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+  if (HAL_DCMIPP_PIPE_EnableISPRawBayer2RGB(hdcmipp, DCMIPP_PIPE1) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
   #define N10(val) (((val) ^ 0x7FF) + 1)
   DCMIPP_ColorConversionConfTypeDef color_conf = {
     .ClampOutputSamples = ENABLE,
@@ -243,19 +268,23 @@ int dcmipp_config(void *luma_address)
 
   dcmipp_get_address(luma_address, &planar_address, &semi_planar_address);
 
-  int ret;
+  /* No sensor/ISP involved: the CSI-2 stream is already running (CrossLink);
+     start the DCMIPP CSI pipe directly to receive it. */
+  HAL_StatusTypeDef ret;
   if (semiplanar)
   {
-    ret = BSP_CAMERA_SemiPlanarStart(0, &semi_planar_address, CAMERA_MODE_CONTINUOUS);
+    ret = HAL_DCMIPP_CSI_PIPE_SemiPlanarStart(&hcamera_dcmipp, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0,
+                                               &semi_planar_address, CAMERA_MODE_CONTINUOUS);
   }
   else
   {
-    ret = BSP_CAMERA_Start(0, luma_address, CAMERA_MODE_CONTINUOUS);
+    ret = HAL_DCMIPP_CSI_PIPE_Start(&hcamera_dcmipp, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0,
+                                     (uint32_t)luma_address, CAMERA_MODE_CONTINUOUS);
   }
 
-  if (ret != BSP_ERROR_NONE)
+  if (ret != HAL_OK)
   {
-    printf("Camera start failed (ret=%d)\n", ret);
+    printf("DCMIPP CSI pipe start failed (ret=%d)\n", ret);
     return -1;
   }
 
@@ -327,6 +356,45 @@ HAL_StatusTypeDef  dcmipp_downsize(DCMIPP_HandleTypeDef *hdcmipp,int32_t pipe, i
   if(HAL_DCMIPP_PIPE_SetDownsizeConfig(hdcmipp, pipe, &DownsizeConf) != HAL_OK) return HAL_ERROR;
   if(HAL_DCMIPP_PIPE_EnableDownsize(hdcmipp, pipe)!= HAL_OK) return HAL_ERROR;
   return HAL_OK;
+}
+
+/**
+ * @brief  Reconfigure the CSI D-PHY bitrate at runtime (lanes/mapping unchanged),
+ *         to let the actual profile be swept from the console without rebuilding.
+ *         Only call while the CSI pipe is stopped.
+ * @param  mbps  Requested bitrate in Mbit/s per lane; snapped to the nearest
+ *               HAL DCMIPP_CSI_PHY_BT_xxx profile.
+ * @retval The Mbit/s value of the profile actually applied.
+ */
+uint32_t dcmipp_set_csi_phy_bitrate(uint32_t mbps)
+{
+  static const uint16_t profile_mbps[] = {
+    80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 205, 220, 235, 250,
+    275, 300, 325, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950,
+    1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600,
+    1650, 1700, 1750, 1800, 1850, 1900, 1950, 2000, 2050, 2100, 2150, 2200, 2250,
+    2300, 2350, 2400, 2450, 2500
+  };
+  uint32_t best_idx = 0U;
+  uint32_t best_diff = 0xFFFFFFFFU;
+  DCMIPP_CSI_ConfTypeDef csiconf = {0};
+
+  for (uint32_t i = 0U; i < (sizeof(profile_mbps) / sizeof(profile_mbps[0])); i++)
+  {
+    uint32_t diff = (profile_mbps[i] > mbps) ? (profile_mbps[i] - mbps) : (mbps - profile_mbps[i]);
+    if (diff < best_diff)
+    {
+      best_diff = diff;
+      best_idx = i;
+    }
+  }
+
+  csiconf.DataLaneMapping = DCMIPP_CSI_PHYSICAL_DATA_LANES;
+  csiconf.NumberOfLanes   = DCMIPP_CSI_TWO_DATA_LANES;
+  csiconf.PHYBitrate      = best_idx;
+  HAL_DCMIPP_CSI_SetConfig(&hcamera_dcmipp, &csiconf);
+
+  return profile_mbps[best_idx];
 }
 
 /**

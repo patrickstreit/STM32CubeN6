@@ -15,6 +15,7 @@ void dcmipp_get_address(void *luma_address,
 int dcmipp_check_config(void);
 int dcmipp_config(void *luma_address);
 void  dcmipp_set_memory_address(void * next_dcmipp_address);
+uint32_t dcmipp_set_csi_phy_bitrate(uint32_t mbps);
 HAL_StatusTypeDef  dcmipp_downsize(DCMIPP_HandleTypeDef *hdcmipp,int32_t pipe, int32_t camWidth,int32_t camHeight,int32_t captureWidth,int32_t captureHeight);
 
 
