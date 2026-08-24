@@ -28,8 +28,18 @@ cmake --build build/CsiProbe
 ```
 
 Output lands in `Appli/build/CsiProbe/` with the same signed `.bin` / `.elf`
-post-build steps as the normal build, so the existing flash task works after
-pointing it at that directory.
+post-build steps as the normal build.
+
+To flash it, run the VS Code task **Flash STM32N6 VENC (Appli only)** and pick
+`CsiProbe`. Only the application slot at `0x70100000` is rewritten; the FSBL
+stays as it is, because Appli compile definitions do not affect it. That also
+makes switching back to the encoder firmware a matter of running the same task
+and picking `Debug` - no FSBL reflash either way.
+
+`CsiProbe` is an Appli-only preset and has no FSBL counterpart, which is why it
+does not appear in **Flash STM32N6 VENC (FSBL + Appli)**: that task flashes both
+images from one top-level preset, where the root `CMakeLists.txt` builds
+`FSBL/build/<preset>` and `Appli/build/<preset>` together.
 
 Footprint for reference: 109 KB flash, 3.8 MB of the 16 MB PSRAM (3 MB of that
 is the TraceX ring, 768 KB the framebuffer). The normal build is unchanged.
