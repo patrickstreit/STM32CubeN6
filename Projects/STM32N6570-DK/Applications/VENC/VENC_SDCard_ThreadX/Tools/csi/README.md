@@ -332,10 +332,53 @@ branch does not patch it.
 
 ---
 
+## 6a. Reading the numbers
+
+**A report belongs to the setting it was measured at.** `csi_probe_report_t`
+carries the D-PHY setting alongside the measurements, and every command that
+changes that setting - `phy`, `link`, `refine`, `scan` - discards the report.
+`report` on a discarded one says so instead of reprinting.
+
+This was not always true, and the failure was instructive: the report printed the
+*live* setting above measurements cached from an earlier run. Changing the
+bitrate and reprinting produced a plausible-looking result for a setting that had
+never been measured - `ecc 48 / 6755 corrected / dphy 568` appeared identically
+under 2500, 2000, 1450 and 1550 Mbit/s. Keeping the two in one struct makes that
+mixture unrepresentable rather than merely discouraged.
+
+**"20!" is not twenty frames.** In the sweep and refine tables a plain number is
+frames that *finished*; `N!` means N frames started and none finished. A row
+showing `20!` delivered nothing usable and ranks below a row with a single real
+frame, which is why `refine` can pick a profile whose row looks worse.
+
+**Error counts are polling samples, not packet counts.** They are only meaningful
+relative to each other, across windows of the same length. One window per profile
+and one power-cycle each is a single sample: treat a small difference between
+neighbouring profiles as noise. The first refine runs bore this out - 1600 Mbit/s
+showed 13509 ECC errors in one pass and its neighbour 1550 showed none, which is
+not a plausible property of a D-PHY frequency band.
+
+**Errors the probe caused itself are suppressed.** Stopping a virtual channel
+part way through a frame raises sync and SOT errors; those used to surface as
+`DCMIPP global error, ErrorCode=0x000c8900` the moment the CSI interrupt was
+re-enabled, in the middle of a measurement that had counted zero. `csi_stop_all_vc()`
+now clears the flags and the HAL error code after stopping.
+
+---
+
 ## 7. Not done
 
-- The characterisation and preview stages have not been seen against a live
+- The characterisation and preview stages have not been seen against a healthy
   link. Every number in the example report is illustrative.
+- **The geometry measurement is unvalidated and currently looks wrong.** On a
+  marginal link at 2500 Mbit/s it returned 1345 lines and 319 bytes per line,
+  where a 1920x1080 RAW10 frame should give 1080 and 2400. Either the byte
+  counter does not count within a line when the line counter is pinned to 1, or
+  the counter is not per-frame and the binary search is converging on a rate
+  rather than a geometry. It has not been re-run against a clean link, which is
+  the first thing to try before changing the method.
+- `refine` takes one sample per profile. Ranking two neighbouring profiles needs
+  repeats, and each repeat costs a manual power-cycle.
 - The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`
   latches SOT/control flags while it drives the D-PHY through reset, which showed
   up as `PHY` on a random-looking subset of bitrates. There is now a settle delay

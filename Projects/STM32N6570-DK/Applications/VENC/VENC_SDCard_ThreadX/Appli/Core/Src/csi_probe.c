@@ -66,9 +66,6 @@ static const uint16_t csi_scan_mbps[] =
 /* Known-good starting point: the setting the encoder application uses. */
 const csi_probe_phy_t csi_probe_default_phy = { .mbps = 1250U, .lanes = 2U, .swapped = 0U };
 
-/* Kept so the report can describe the link quality of the run that produced it. */
-static csi_probe_result_t g_last_result;
-
 /* Manual by default: the source may well be on a bench supply, with no line back
    to the board for BSP_CAMERA_HwReset() to pull. */
 static csi_source_mode_t g_source_mode = CSI_SOURCE_MANUAL;
@@ -229,6 +226,16 @@ static void csi_stop_all_vc(void)
                               DCMIPP_CSI_IT_SOF2 | DCMIPP_CSI_IT_SOF3 |
                               DCMIPP_CSI_IT_EOF0 | DCMIPP_CSI_IT_EOF1 |
                               DCMIPP_CSI_IT_EOF2 | DCMIPP_CSI_IT_EOF3);
+
+  /* Stopping a channel part way through a frame raises sync and SOT errors of
+     the probe's own making. Every caller stops channels only after it has
+     finished accumulating, so dropping those flags here loses nothing - and it
+     stops the HAL error callback from reporting them the moment the CSI
+     interrupt is re-enabled, which read as a link fault in the middle of an
+     otherwise error-free measurement. */
+  CSI->FCR0 = 0xFFFFFFFFU;
+  CSI->FCR1 = 0xFFFFFFFFU;
+  hcamera_dcmipp.ErrorCode = HAL_DCMIPP_ERROR_NONE;
 }
 
 /**
@@ -604,7 +611,7 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
     printf("CSI: source transmitting after %lu ms\n", (unsigned long)(boot_ms - 1U));
   }
 
-  printf("  mbps  ln map  | dphy activity      | frames per vc (! = no end of frame) | ecc crc phy\n");
+  printf("  mbps  ln map  | dphy activity      | complete frames per vc (N! = none finished) | ecc crc phy\n");
 
   for (uint32_t lanes = 2U; lanes >= 1U; lanes--)
   {
@@ -850,7 +857,7 @@ bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window
          (phy->swapped != 0U) ? "inverted" : "physical");
   printf("CSI: %lu profiles, each needs the source restarted\n",
          (unsigned long)((last_idx - first_idx) + 1U));
-  printf("  mbps  | frames per vc (! = no end of frame) | ecc crc phy\n");
+  printf("  mbps  | complete frames per vc (N! = N started, none finished) | ecc crc phy\n");
 
   for (uint32_t idx = first_idx; idx <= last_idx; idx++)
   {
@@ -905,8 +912,13 @@ bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window
     return false;
   }
 
-  printf("CSI: quietest is %u Mbit/s (%lu frames, %lu errors)\n",
+  /* "frames" here means frames that finished. A row showing 20! delivered no
+     complete frame at all and so ranks below a row with a single real one, which
+     looks wrong at a glance unless the units are spelled out. */
+  printf("CSI: quietest is %u Mbit/s (%lu complete frames, %lu errors)\n",
          (unsigned)winner.mbps, (unsigned long)best_frames, (unsigned long)best_errors);
+  printf("CSI: one window per profile and one restart each, so a small difference\n");
+  printf("     between neighbours is noise rather than a ranking. Repeat to confirm.\n");
   *phy = winner;
   return true;
 }
@@ -1144,17 +1156,29 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
 /* Full run and report                                                       */
 /* ------------------------------------------------------------------------- */
 
-void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_COUNT])
+void csi_probe_report_invalidate(csi_probe_report_t *report)
 {
-  csi_probe_result_t result;
-  const uint32_t     window_ms = 500U;
+  if (report != NULL)
+  {
+    memset(report, 0, sizeof(*report));
+  }
+}
 
-  if ((phy == NULL) || (info == NULL))
+void csi_probe_run(csi_probe_phy_t *phy, csi_probe_report_t *report)
+{
+  csi_probe_result_t   result;
+  csi_probe_vc_info_t *info;
+  const uint32_t       window_ms = 500U;
+
+  if ((phy == NULL) || (report == NULL))
   {
     return;
   }
 
-  memset(info, 0, sizeof(csi_probe_vc_info_t) * CSI_PROBE_VC_COUNT);
+  /* Cleared up front: a run that bails out half way must not leave the previous
+     one's numbers behind to be reprinted later. */
+  csi_probe_report_invalidate(report);
+  info = report->vc;
 
   if (phy->mbps == 0U)
   {
@@ -1189,7 +1213,10 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
   printf("CSI: source transmitting %lu ms after its restart\n",
          (unsigned long)(result.source_boot_ms - 1U));
 
-  g_last_result = result;
+  report->phy           = *phy;
+  report->link          = result;
+  report->link_measured = true;
+  report->valid         = true;
 
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
@@ -1221,32 +1248,62 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
   }
 }
 
-void csi_probe_print_report(const csi_probe_phy_t *phy,
-                            const csi_probe_vc_info_t info[CSI_PROBE_VC_COUNT])
+void csi_probe_print_report(const csi_probe_report_t *report, const csi_probe_phy_t *current)
 {
-  if ((phy == NULL) || (info == NULL))
+  const csi_probe_vc_info_t *info;
+  const csi_probe_phy_t     *phy;
+
+  if (report == NULL)
   {
     return;
   }
+
+  if (!report->valid)
+  {
+    printf("CSI: nothing measured yet - run 'probe'\n");
+    return;
+  }
+
+  info = report->vc;
+  phy  = &report->phy;
 
   printf("\n=== CSI-2 probe result ===\n");
   printf("D-PHY : %u Mbit/s per lane, %u lane(s), %s mapping\n",
          (unsigned)phy->mbps, (unsigned)phy->lanes,
          (phy->swapped != 0U) ? "inverted" : "physical");
 
-  if ((g_last_result.err_ecc | g_last_result.err_crc | g_last_result.err_phy) != 0U)
+  /* The setting printed above is the one these numbers were taken at, not
+     whatever the receiver holds now. Say so when they have drifted apart. */
+  if ((current != NULL) &&
+      ((current->mbps != phy->mbps) || (current->lanes != phy->lanes) ||
+       (current->swapped != phy->swapped)))
   {
-    printf("Link  : MARGINAL - ecc %lu uncorrectable / %lu corrected, crc %lu, dphy %lu\n",
-           (unsigned long)g_last_result.err_ecc,
-           (unsigned long)g_last_result.err_ecc_corrected,
-           (unsigned long)g_last_result.err_crc,
-           (unsigned long)g_last_result.err_phy);
-    printf("        Try the neighbouring bitrate profiles and compare these counts;\n");
+    printf("        (the receiver now holds %u Mbit/s, %u lane(s), %s mapping;\n"
+           "         these numbers are from the setting above - rerun 'probe')\n",
+           (unsigned)current->mbps, (unsigned)current->lanes,
+           (current->swapped != 0U) ? "inverted" : "physical");
+  }
+
+  if (!report->link_measured)
+  {
+    printf("Link  : not measured in this run\n");
+  }
+  else if ((report->link.err_ecc | report->link.err_crc | report->link.err_phy) != 0U)
+  {
+    printf("Link  : MARGINAL over %lu ms - ecc %lu uncorrectable / %lu corrected, "
+           "crc %lu, dphy %lu\n",
+           (unsigned long)report->link.window_ms,
+           (unsigned long)report->link.err_ecc,
+           (unsigned long)report->link.err_ecc_corrected,
+           (unsigned long)report->link.err_crc,
+           (unsigned long)report->link.err_phy);
+    printf("        'refine' compares the neighbouring bitrate profiles;\n");
     printf("        an uncorrectable header ECC error changes the data type value.\n");
   }
   else
   {
-    printf("Link  : clean, no ecc/crc/dphy errors during the window\n");
+    printf("Link  : clean over %lu ms, no ecc/crc/dphy errors\n",
+           (unsigned long)report->link.window_ms);
   }
 
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)

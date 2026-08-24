@@ -189,16 +189,44 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
 void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info);
 
 /**
-  * @brief  Full run: scan, then characterise every virtual channel that is present.
-  * @param  phy   in/out: if phy->mbps is 0 a full sweep is run and the winner is
-  *               written back; otherwise only that setting is characterised
-  * @param  info  out: one entry per virtual channel
+  * Everything one characterisation produced, including the setting it was
+  * measured at.
+  *
+  * The setting lives in here rather than being read from wherever the caller
+  * keeps its current one, so a report can never present fresh configuration next
+  * to stale measurements - which is exactly what happened when the two were kept
+  * apart: changing the bitrate and reprinting showed the new bitrate above error
+  * counts from a previous run at a different one.
   */
-void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_COUNT]);
+typedef struct
+{
+  bool                valid;         /*!< false until something was measured    */
+  bool                link_measured; /*!< false when only dt/geometry were rerun */
+  csi_probe_phy_t     phy;           /*!< the setting these numbers belong to   */
+  csi_probe_result_t  link;          /*!< frame counts and error counts         */
+  csi_probe_vc_info_t vc[CSI_PROBE_VC_COUNT];
+} csi_probe_report_t;
 
-/** @brief Print a human readable summary of a completed run. */
-void csi_probe_print_report(const csi_probe_phy_t *phy,
-                            const csi_probe_vc_info_t info[CSI_PROBE_VC_COUNT]);
+/** @brief Discard a characterisation, e.g. after the D-PHY setting changed. */
+void csi_probe_report_invalidate(csi_probe_report_t *report);
+
+/**
+  * @brief  Full run: find a setting if needed, then characterise every virtual
+  *         channel that is present.
+  * @param  phy     in/out: if phy->mbps is 0 the known-good setting is tried and
+  *                 then a sweep; otherwise only that setting is characterised.
+  *                 The winner is written back.
+  * @param  report  out: cleared first, then filled
+  */
+void csi_probe_run(csi_probe_phy_t *phy, csi_probe_report_t *report);
+
+/**
+  * @brief  Print a characterisation.
+  * @param  current  the setting the receiver holds right now, or NULL. When it
+  *                  differs from the one the report was measured at, the
+  *                  mismatch is called out instead of being papered over.
+  */
+void csi_probe_print_report(const csi_probe_report_t *report, const csi_probe_phy_t *current);
 
 /** @brief Print CSI_SR0/CSI_SR1/CSI_ERR1/CSI_ERR2 decoded, without changing anything. */
 void csi_probe_dump_status(void);

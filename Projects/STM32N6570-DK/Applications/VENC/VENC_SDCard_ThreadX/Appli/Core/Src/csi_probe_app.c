@@ -29,8 +29,8 @@
 extern UART_HandleTypeDef  hcom_uart[];
 extern DCMIPP_HandleTypeDef hcamera_dcmipp;
 
-static csi_probe_phy_t     g_phy;
-static csi_probe_vc_info_t g_vc[CSI_PROBE_VC_COUNT];
+static csi_probe_phy_t    g_phy;      /* what the receiver is set to right now */
+static csi_probe_report_t g_report;   /* and what was measured, at its own setting */
 
 /* ------------------------------------------------------------------------- */
 /* BSP hooks                                                                 */
@@ -72,24 +72,60 @@ void BSP_CAMERA_ErrorCallback(uint32_t Instance)
 /* Preview selection                                                         */
 /* ------------------------------------------------------------------------- */
 
+/**
+  * @brief  Make the report describe the setting the receiver holds now.
+  * @note   Called before a partial measurement such as 'dt' or 'geom'. If the
+  *         report belongs to a different setting its numbers are dropped rather
+  *         than mixed with the new ones - that mixture is what made a stale run
+  *         at 1250 look like a fresh result at every other bitrate.
+  */
+static void report_rebase(void)
+{
+  if (g_report.valid &&
+      (g_report.phy.mbps == g_phy.mbps) &&
+      (g_report.phy.lanes == g_phy.lanes) &&
+      (g_report.phy.swapped == g_phy.swapped))
+  {
+    return;
+  }
+
+  csi_probe_report_invalidate(&g_report);
+  g_report.phy   = g_phy;
+  g_report.valid = true;   /* link stats stay absent: link_measured is false */
+}
+
 /** @brief Fill a preview source from what the probe measured for @p vc. */
 static bool source_from_probe(uint32_t vc, csi_preview_source_t *src)
 {
-  if ((vc >= CSI_PROBE_VC_COUNT) || !g_vc[vc].present)
+  const csi_probe_vc_info_t *info;
+
+  if (!g_report.valid)
+  {
+    printf("CTRL: nothing measured yet; run 'probe' first\n");
+    return false;
+  }
+  if (vc >= CSI_PROBE_VC_COUNT)
+  {
+    return false;
+  }
+
+  info = &g_report.vc[vc];
+
+  if (!info->present)
   {
     printf("CTRL: VC%lu was not seen by the probe; run 'probe' first\n", (unsigned long)vc);
     return false;
   }
-  if ((g_vc[vc].width == 0U) || (g_vc[vc].lines == 0U))
+  if ((info->width == 0U) || (info->lines == 0U))
   {
     printf("CTRL: geometry of VC%lu is unknown, cannot configure the pipe\n", (unsigned long)vc);
     return false;
   }
 
   src->vc     = vc;
-  src->dt     = g_vc[vc].image_dt;
-  src->width  = g_vc[vc].width;
-  src->height = g_vc[vc].lines;
+  src->dt     = info->image_dt;
+  src->width  = info->width;
+  src->height = info->lines;
   return true;
 }
 
@@ -101,7 +137,9 @@ static void preview_best_effort(void)
 
   for (uint32_t vc = 0U; (vc < CSI_PROBE_VC_COUNT) && (found < 2U); vc++)
   {
-    if (g_vc[vc].present && (g_vc[vc].width != 0U) && (g_vc[vc].lines != 0U))
+    const csi_probe_vc_info_t *info = &g_report.vc[vc];
+
+    if (g_report.valid && info->present && (info->width != 0U) && (info->lines != 0U))
     {
       if (source_from_probe(vc, &src[found]))
       {
@@ -192,6 +230,7 @@ static void handle_command(char *line)
     {
       g_phy = csi_probe_default_phy;
     }
+    csi_probe_report_invalidate(&g_report);
     (void)csi_probe_wait_for_link(&g_phy, arg_u32(line, 0U, 0U));
   }
   else if (strncmp(line, "refine", 6) == 0)
@@ -201,6 +240,7 @@ static void handle_command(char *line)
     {
       g_phy = csi_probe_default_phy;
     }
+    csi_probe_report_invalidate(&g_report);
     (void)csi_probe_refine(&g_phy, arg_u32(line, 0U, 2U), 400U);
   }
   else if (strncmp(line, "source", 6) == 0)
@@ -227,6 +267,7 @@ static void handle_command(char *line)
   {
     csi_preview_stop();
     /* The winner lands in g_phy so a following bare "probe" characterises it. */
+    csi_probe_report_invalidate(&g_report);
     (void)csi_probe_scan(arg_u32(line, 0U, 150U), arg_has(line, "slow"), &g_phy);
   }
   else if (strncmp(line, "probe", 5) == 0)
@@ -234,12 +275,13 @@ static void handle_command(char *line)
     csi_preview_stop();
     g_phy.mbps    = (uint16_t)arg_u32(line, 0U, 0U);
     g_phy.lanes   = (g_phy.lanes == 0U) ? 2U : g_phy.lanes;
-    csi_probe_run(&g_phy, g_vc);
-    csi_probe_print_report(&g_phy, g_vc);
+    csi_probe_run(&g_phy, &g_report);
+    csi_probe_print_report(&g_report, &g_phy);
   }
   else if (strncmp(line, "phy ", 4) == 0)
   {
     csi_preview_stop();
+    csi_probe_report_invalidate(&g_report);
     g_phy.mbps    = (uint16_t)arg_u32(line, 0U, 1500U);
     g_phy.lanes   = (uint8_t)arg_u32(line, 1U, 2U);
     g_phy.swapped = arg_has(line, "swap") ? 1U : 0U;
@@ -257,23 +299,26 @@ static void handle_command(char *line)
       printf("CTRL: applying the D-PHY setting failed\n");
     }
   }
-  else if (strncmp(line, "dt ", 3) == 0)
+  else if (strncmp(line, "dt", 2) == 0)
   {
     uint32_t vc = arg_u32(line, 0U, 0U);
     if (vc < CSI_PROBE_VC_COUNT)
     {
-      csi_probe_datatypes(vc, 200U, &g_vc[vc]);
-      g_vc[vc].present = (g_vc[vc].dt_mask_lo != 0U) || (g_vc[vc].dt_mask_hi != 0U);
-      csi_probe_print_report(&g_phy, g_vc);
+      report_rebase();
+      csi_probe_datatypes(vc, 200U, &g_report.vc[vc]);
+      g_report.vc[vc].present = (g_report.vc[vc].dt_mask_lo != 0U) ||
+                                (g_report.vc[vc].dt_mask_hi != 0U);
+      csi_probe_print_report(&g_report, &g_phy);
     }
   }
-  else if (strncmp(line, "geom ", 5) == 0)
+  else if (strncmp(line, "geom", 4) == 0)
   {
     uint32_t vc = arg_u32(line, 0U, 0U);
     if (vc < CSI_PROBE_VC_COUNT)
     {
-      csi_probe_geometry(vc, &g_vc[vc]);
-      csi_probe_print_report(&g_phy, g_vc);
+      report_rebase();
+      csi_probe_geometry(vc, &g_report.vc[vc]);
+      csi_probe_print_report(&g_report, &g_phy);
     }
   }
   else if (strncmp(line, "single ", 7) == 0)
@@ -306,7 +351,7 @@ static void handle_command(char *line)
   }
   else if (strcmp(line, "report") == 0)
   {
-    csi_probe_print_report(&g_phy, g_vc);
+    csi_probe_print_report(&g_report, &g_phy);
   }
   else if (line[0] != '\0')
   {
@@ -347,8 +392,8 @@ void csi_probe_thread_func(ULONG arg)
 
   g_phy.mbps  = 0U;   /* 0 = known-good first, then sweep */
   g_phy.lanes = 2U;
-  csi_probe_run(&g_phy, g_vc);
-  csi_probe_print_report(&g_phy, g_vc);
+  csi_probe_run(&g_phy, &g_report);
+  csi_probe_print_report(&g_report, &g_phy);
 
   preview_best_effort();
 
