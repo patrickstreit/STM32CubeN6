@@ -25,10 +25,20 @@ extern DCMIPP_HandleTypeDef hcamera_dcmipp;
    they are cleared afterwards rather than reported. */
 #define CSI_PHY_SETTLE_MS   5U
 
-/* Time given to the source to boot and start transmitting after its power and
-   reset lines were cycled. An FPGA-based transmitter has to reload its
-   configuration, so this is generous by default. */
-#define CSI_SOURCE_BOOT_MS  600U
+/* How long to wait for the source to start transmitting. These are timeouts, not
+   delays: the wait ends as soon as the receiver reports a high-speed clock.
+   Guessing a fixed delay is not an option - too short and every measurement
+   afterwards silently characterises a dead link, which is exactly what a 600 ms
+   guess did on the first hardware run.
+   Driven from the board, the FPGA source measured 6 to 8 seconds to reload its
+   configuration. Power-cycled by hand it takes as long as it takes, and the
+   operator needs a few seconds on the supply before that even begins. */
+#define CSI_SOURCE_AUTO_TIMEOUT_MS    15000U
+#define CSI_SOURCE_MANUAL_TIMEOUT_MS  90000U
+
+/* After the clock appears, the lanes still have to synchronise and the first
+   frame has to start. */
+#define CSI_SOURCE_SYNC_GRACE_MS        300U
 
 /* Bitrate of every HAL DCMIPP_CSI_PHY_BT_xxx profile, in profile order. */
 static const uint16_t csi_phy_profile_mbps[] =
@@ -55,6 +65,19 @@ static const uint16_t csi_scan_mbps[] =
 
 /* Known-good starting point: the setting the encoder application uses. */
 const csi_probe_phy_t csi_probe_default_phy = { .mbps = 1250U, .lanes = 2U, .swapped = 0U };
+
+/* Kept so the report can describe the link quality of the run that produced it. */
+static csi_probe_result_t g_last_result;
+
+/* Manual by default: the source may well be on a bench supply, with no line back
+   to the board for BSP_CAMERA_HwReset() to pull. */
+static csi_source_mode_t g_source_mode = CSI_SOURCE_MANUAL;
+
+/* What the D-PHY is currently programmed with, and whether the last apply
+   actually reprogrammed it. Together they keep the probe from asking for a
+   power-cycle it does not need. mbps 0 means "nothing applied yet". */
+static csi_probe_phy_t g_applied_phy;
+static bool            g_phy_reapplied;
 
 static const uint32_t vc_start_bit[CSI_PROBE_VC_COUNT] =
 { CSI_CR_VC0START, CSI_CR_VC1START, CSI_CR_VC2START, CSI_CR_VC3START };
@@ -241,6 +264,18 @@ HAL_StatusTypeDef csi_probe_apply_phy(const csi_probe_phy_t *phy)
     return HAL_ERROR;
   }
 
+  /* Applying a setting resets the D-PHY and therefore drops the link, which then
+     costs a source restart - a manual one, in the default mode. Re-applying the
+     setting that is already programmed would do that for nothing. */
+  if ((g_applied_phy.mbps == phy->mbps) &&
+      (g_applied_phy.lanes == phy->lanes) &&
+      (g_applied_phy.swapped == phy->swapped))
+  {
+    g_phy_reapplied = false;
+    return HAL_OK;
+  }
+  g_phy_reapplied = true;
+
   csi_stop_all_vc();
 
   csiconf.NumberOfLanes   = (phy->lanes == 1U) ? DCMIPP_CSI_ONE_DATA_LANE
@@ -262,6 +297,7 @@ HAL_StatusTypeDef csi_probe_apply_phy(const csi_probe_phy_t *phy)
   CSI->FCR0 = 0xFFFFFFFFU;
   CSI->FCR1 = 0xFFFFFFFFU;
 
+  g_applied_phy = *phy;
   return HAL_OK;
 }
 
@@ -273,6 +309,67 @@ void csi_probe_source_restart(uint32_t settle_ms)
      puts the receiver through reset again. */
   (void)BSP_CAMERA_HwReset(0);
   HAL_Delay(settle_ms);
+}
+
+void csi_probe_set_source_mode(csi_source_mode_t mode)
+{
+  g_source_mode = mode;
+}
+
+csi_source_mode_t csi_probe_get_source_mode(void)
+{
+  return g_source_mode;
+}
+
+uint32_t csi_probe_source_cycle_wait(uint32_t timeout_ms)
+{
+  uint32_t tickstart;
+  uint32_t elapsed  = 0U;
+  uint32_t next_dot = 1000U;
+
+  if (timeout_ms == 0U)
+  {
+    timeout_ms = (g_source_mode == CSI_SOURCE_AUTO) ? CSI_SOURCE_AUTO_TIMEOUT_MS
+                                                    : CSI_SOURCE_MANUAL_TIMEOUT_MS;
+  }
+
+  if (g_source_mode == CSI_SOURCE_AUTO)
+  {
+    (void)BSP_CAMERA_HwReset(0);
+  }
+  else
+  {
+    printf("CSI: power-cycle the source now (waiting up to %lu s for its clock)\n",
+           (unsigned long)(timeout_ms / 1000U));
+  }
+
+  tickstart = HAL_GetTick();
+  while ((CSI->SR1 & CSI_SR1_ACTCLF) == 0U)
+  {
+    elapsed = HAL_GetTick() - tickstart;
+    if (elapsed >= timeout_ms)
+    {
+      printf("\nCSI: no clock after %lu s\n", (unsigned long)(timeout_ms / 1000U));
+      return 0U;
+    }
+
+    /* One dot per second, so a long manual wait does not look like a hang. */
+    if ((g_source_mode == CSI_SOURCE_MANUAL) && (elapsed >= next_dot))
+    {
+      printf(".");
+      fflush(stdout);
+      next_dot += 1000U;
+    }
+  }
+
+  if (g_source_mode == CSI_SOURCE_MANUAL)
+  {
+    printf("\n");
+  }
+
+  /* Clock is there; give the lanes time to synchronise and a frame to start. */
+  HAL_Delay(CSI_SOURCE_SYNC_GRACE_MS);
+  return elapsed + 1U;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -319,10 +416,20 @@ bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms,
     SET_BIT(CSI->CR, vc_start_bit[vc]);
   }
 
-  /* Receiver is fully up now; only then is it worth restarting the source. */
+  /* Receiver is fully up now; only then is it worth restarting the source - and
+     only if the link is not already running. Asking a human to power-cycle
+     something that is already transmitting is how a diagnostic tool gets
+     abandoned. */
   if (restart_source)
   {
-    csi_probe_source_restart(CSI_SOURCE_BOOT_MS);
+    if (g_phy_reapplied || ((CSI->SR1 & CSI_SR1_ACTCLF) == 0U))
+    {
+      out->source_boot_ms = csi_probe_source_cycle_wait(0U);
+    }
+    else
+    {
+      out->source_boot_ms = 1U;   /* already transmitting */
+    }
   }
 
   /* Discard whatever accumulated while the channels were coming up. */
@@ -357,6 +464,14 @@ bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms,
         any_frame = true;
       }
     }
+
+    /* Counting errors rather than only flagging them is what makes neighbouring
+       bitrate profiles comparable: a link can be up and still be marginal, and
+       the difference only shows as a rate. */
+    if ((sr0 & CSI_SR0_ECCERRF)  != 0U) { out->err_ecc++; }
+    if ((sr0 & CSI_SR0_CECCERRF) != 0U) { out->err_ecc_corrected++; }
+    if ((sr0 & CSI_SR0_CRCERRF)  != 0U) { out->err_crc++; }
+    if ((sr1 & CSI_SR1_PHY_ERRORS) != 0U) { out->err_phy++; }
 
     /* Error flags are cleared as well, so the sticky OR reflects errors that
        kept coming rather than one latched at start-up. */
@@ -419,13 +534,14 @@ static void csi_print_scan_row(const csi_probe_result_t *r)
          ((r->sr1 & CSI_SR1_SYNCDL1F) != 0U) ? 'S' : '-',
          vc_text[0], vc_text[1], vc_text[2], vc_text[3]);
 
-  if ((r->sr1 & CSI_SR1_PHY_ERRORS) != 0U) { printf(" PHY"); }
-  if ((r->sr0 & CSI_SR0_ECCERRF)    != 0U) { printf(" ECC"); }
-  if ((r->sr0 & CSI_SR0_CRCERRF)    != 0U) { printf(" CRC"); }
-  if ((r->sr0 & CSI_SR0_SYNCERRF)   != 0U) { printf(" SYNC"); }
-  if ((r->sr0 & CSI_SR0_WDERRF)     != 0U) { printf(" WDG"); }
-  if ((r->sr0 & CSI_SR0_SPKTERRF)   != 0U) { printf(" SPKT"); }
-  if ((r->sr0 & CSI_SR0_CECCERRF)   != 0U) { printf(" ecc-corrected"); }
+  /* Counts, not just flags: a link can be up and still be marginal, and picking
+     between neighbouring bitrate profiles is a comparison of rates. */
+  printf(" %3lu %3lu %3lu", (unsigned long)r->err_ecc, (unsigned long)r->err_crc,
+         (unsigned long)r->err_phy);
+
+  if ((r->sr0 & CSI_SR0_SYNCERRF) != 0U) { printf(" SYNC"); }
+  if ((r->sr0 & CSI_SR0_WDERRF)   != 0U) { printf(" WDG"); }
+  if ((r->sr0 & CSI_SR0_SPKTERRF) != 0U) { printf(" SPKT"); }
   printf("\n");
 }
 
@@ -439,21 +555,56 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
   csi_probe_result_t result;
   csi_probe_phy_t    winner       = {0};
   uint32_t           best_frames  = 0U;
+  uint32_t           best_errors  = 0xFFFFFFFFU;
   bool               best_clean   = false;
   bool               found        = false;
   bool               clock_seen   = false;
   uint32_t           combinations = CSI_SCAN_MBPS_COUNT * 4U;
 
+  if (restart_source && (g_source_mode == CSI_SOURCE_MANUAL))
+  {
+    /* One prompt per combination is not a workflow. Fall back to a single
+       restart up front and say so. */
+    printf("CSI: source mode is manual, so a restart per combination would mean %lu\n"
+           "     power-cycles by hand. Doing one up front instead; 'refine' is the\n"
+           "     command for comparing a handful of profiles properly.\n",
+           (unsigned long)combinations);
+    restart_source = false;
+  }
+
   printf("CSI: scanning %u bitrates x 2 lane counts x 2 mappings, %lu ms each%s\n",
          (unsigned)CSI_SCAN_MBPS_COUNT, (unsigned long)window_ms,
          restart_source ? ", restarting the source each time" : "");
+
   if (restart_source)
   {
-    /* Each iteration pays for the reset sequence plus the source's boot time. */
-    printf("CSI: about %lu s in total\n",
-           (unsigned long)((combinations * (window_ms + CSI_SOURCE_BOOT_MS + 400U)) / 1000U));
+    /* Each iteration pays for the reset sequence plus the source's boot time,
+       and that boot time was measured in seconds, not milliseconds. */
+    printf("CSI: this restarts the source %lu times; expect several minutes\n",
+           (unsigned long)combinations);
   }
-  printf("  mbps  ln map  | dphy activity      | frames per vc (! = no end of frame) | errors\n");
+  else
+  {
+    /* One restart up front, then sweep against a transmitter that keeps running.
+       Whether it survives the receiver resets in between is exactly what the
+       table will show: if only the first rows carry frames, it does not, and the
+       sweep is not a usable instrument for this source. */
+    uint32_t boot_ms;
+
+    printf("CSI: starting the source once, then sweeping without restarting it\n");
+    HAL_NVIC_DisableIRQ(CSI_IRQn);
+    boot_ms = csi_probe_source_cycle_wait(0U);
+    HAL_NVIC_EnableIRQ(CSI_IRQn);
+
+    if (boot_ms == 0U)
+    {
+      printf("CSI: the source never produced a clock; nothing to sweep against.\n");
+      return false;
+    }
+    printf("CSI: source transmitting after %lu ms\n", (unsigned long)(boot_ms - 1U));
+  }
+
+  printf("  mbps  ln map  | dphy activity      | frames per vc (! = no end of frame) | ecc crc phy\n");
 
   for (uint32_t lanes = 2U; lanes >= 1U; lanes--)
   {
@@ -463,6 +614,7 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
       {
         csi_probe_phy_t phy;
         uint32_t        frames;
+        uint32_t        errors;
         bool            clean;
 
         phy.mbps    = csi_scan_mbps[i];
@@ -477,8 +629,8 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
         }
 
         frames = csi_result_frames(&result);
-        clean  = ((result.sr1 & CSI_SR1_PHY_ERRORS) == 0U) &&
-                 ((result.sr0 & CSI_SR0_LINK_ERRORS) == 0U);
+        errors = result.err_ecc + result.err_crc + result.err_phy;
+        clean  = (errors == 0U);
 
         /* Only rows that carry information; a full sweep is otherwise four
            screens of "nothing here". */
@@ -493,12 +645,16 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
         }
         found = true;
 
-        /* An error-free lock always beats a noisy one; within the same class,
-           more frames means a more stable link. */
-        if ((clean && !best_clean) || ((clean == best_clean) && (frames > best_frames)))
+        /* Rank by frames first, then by how quiet the link was. Frames are the
+           thing being asked for; error count is what separates two settings that
+           both deliver them, which is the case that matters when the source sits
+           between two D-PHY profiles. */
+        if ((frames > best_frames) ||
+            ((frames == best_frames) && (errors < best_errors)))
         {
           best_clean  = clean;
           best_frames = frames;
+          best_errors = errors;
           winner      = phy;
         }
       }
@@ -541,7 +697,7 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
 /* Link watch                                                                */
 /* ------------------------------------------------------------------------- */
 
-bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bool restart_source)
+bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms)
 {
   uint32_t tickstart;
   uint32_t seen_sr0 = 0U;
@@ -553,6 +709,12 @@ bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bo
   if (phy == NULL)
   {
     return false;
+  }
+
+  if (timeout_ms == 0U)
+  {
+    timeout_ms = (g_source_mode == CSI_SOURCE_AUTO) ? CSI_SOURCE_AUTO_TIMEOUT_MS
+                                                    : CSI_SOURCE_MANUAL_TIMEOUT_MS;
   }
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
@@ -574,7 +736,7 @@ bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bo
          (unsigned)phy->mbps, (unsigned)phy->lanes,
          (phy->swapped != 0U) ? "inverted" : "physical", (unsigned long)timeout_ms);
 
-  if (restart_source)
+  if (g_source_mode == CSI_SOURCE_AUTO)
   {
     printf("CSI: cycling the source's power and reset lines\n");
     /* No settle delay here: the point of this function is to watch the link come
@@ -583,7 +745,7 @@ bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bo
   }
   else
   {
-    printf("CSI: power-cycle the source now if it does not start on its own\n");
+    printf("CSI: >>> power-cycle the source now <<<\n");
   }
 
   CSI->FCR0 = 0xFFFFFFFFU;
@@ -654,6 +816,102 @@ bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bo
 }
 
 /* ------------------------------------------------------------------------- */
+/* Refine                                                                    */
+/* ------------------------------------------------------------------------- */
+
+bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window_ms)
+{
+  csi_probe_result_t result;
+  csi_probe_phy_t    winner      = {0};
+  uint32_t           centre_idx;
+  uint32_t           first_idx;
+  uint32_t           last_idx;
+  uint32_t           best_frames = 0U;
+  uint32_t           best_errors = 0xFFFFFFFFU;
+  bool               found       = false;
+
+  if (phy == NULL)
+  {
+    return false;
+  }
+
+  centre_idx = csi_probe_bitrate_profile(phy->mbps, NULL);
+  first_idx  = (centre_idx > neighbours) ? (centre_idx - neighbours) : 0U;
+  last_idx   = centre_idx + neighbours;
+  if (last_idx >= CSI_PHY_PROFILE_COUNT)
+  {
+    last_idx = CSI_PHY_PROFILE_COUNT - 1U;
+  }
+
+  printf("CSI: comparing profiles %u..%u Mbit/s around %u, %u lane(s), %s mapping\n",
+         (unsigned)csi_phy_profile_mbps[first_idx],
+         (unsigned)csi_phy_profile_mbps[last_idx],
+         (unsigned)phy->mbps, (unsigned)phy->lanes,
+         (phy->swapped != 0U) ? "inverted" : "physical");
+  printf("CSI: %lu profiles, each needs the source restarted\n",
+         (unsigned long)((last_idx - first_idx) + 1U));
+  printf("  mbps  | frames per vc (! = no end of frame) | ecc crc phy\n");
+
+  for (uint32_t idx = first_idx; idx <= last_idx; idx++)
+  {
+    csi_probe_phy_t candidate = *phy;
+    char            vc_text[CSI_PROBE_VC_COUNT][12];
+    uint32_t        frames;
+    uint32_t        errors;
+
+    candidate.mbps = csi_phy_profile_mbps[idx];
+
+    (void)csi_probe_observe(&candidate, window_ms, true, &result);
+
+    if (result.source_boot_ms == 0U)
+    {
+      printf("  %4u  | source did not start\n", (unsigned)candidate.mbps);
+      continue;
+    }
+
+    for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+    {
+      csi_format_vc(vc_text[vc], sizeof(vc_text[vc]), result.sof[vc], result.eof[vc]);
+    }
+
+    frames = csi_result_frames(&result);
+    errors = result.err_ecc + result.err_crc + result.err_phy;
+
+    printf("  %4u  | %5s %5s %5s %5s | %3lu %3lu %3lu\n",
+           (unsigned)candidate.mbps,
+           vc_text[0], vc_text[1], vc_text[2], vc_text[3],
+           (unsigned long)result.err_ecc, (unsigned long)result.err_crc,
+           (unsigned long)result.err_phy);
+
+    if (frames == 0U)
+    {
+      continue;
+    }
+    found = true;
+
+    /* Frames first, then quietness - the same ranking the sweep uses, which is
+       what makes the two comparable. */
+    if ((frames > best_frames) || ((frames == best_frames) && (errors < best_errors)))
+    {
+      best_frames = frames;
+      best_errors = errors;
+      winner      = candidate;
+    }
+  }
+
+  if (!found)
+  {
+    printf("CSI: no profile in that range delivered a frame\n");
+    return false;
+  }
+
+  printf("CSI: quietest is %u Mbit/s (%lu frames, %lu errors)\n",
+         (unsigned)winner.mbps, (unsigned long)best_frames, (unsigned long)best_errors);
+  *phy = winner;
+  return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Data type identification                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -661,6 +919,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
 {
   DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
   uint32_t tickstart;
+  static uint32_t dt_count[CSI_PROBE_DT_COUNT];   /* static: 256 B off the stack */
 
   if ((info == NULL) || (vc >= CSI_PROBE_VC_COUNT))
   {
@@ -670,6 +929,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
   info->dt_mask_lo = 0U;
   info->dt_mask_hi = 0U;
   info->image_dt   = 0U;
+  memset(dt_count, 0, sizeof(dt_count));
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
   csi_stop_all_vc();
@@ -712,6 +972,10 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
         {
           info->dt_mask_hi |= (1UL << (err_dt - 32U));
         }
+        if (dt_count[err_dt] < 0xFFFFFFFFU)
+        {
+          dt_count[err_dt]++;
+        }
       }
     }
   }
@@ -723,13 +987,34 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
   (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
   HAL_NVIC_EnableIRQ(CSI_IRQn);
 
-  /* The image data type is the long-packet type in the observed set. */
-  for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
+  /* The image data type is the long-packet type that arrived most often.
+     Picking the lowest-numbered one instead would be wrong on a marginal link:
+     an ECC error the receiver cannot correct turns a data type into a
+     neighbouring value, and RAW10 (0x2b) corrupted into 0x2f is indistinguishable
+     from a genuine data type on a single observation. The real one dominates by
+     orders of magnitude, a corrupted one appears a handful of times. */
   {
-    if (dt_seen(info, dt) && dt_is_image(dt))
+    uint32_t best_count = 0U;
+
+    for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
     {
-      info->image_dt = dt;
-      break;
+      if (dt_is_image(dt) && (dt_count[dt] > best_count))
+      {
+        best_count     = dt_count[dt];
+        info->image_dt = dt;
+      }
+    }
+    info->image_dt_count = best_count;
+
+    /* Anything else that looked like an image type is header corruption, and
+       saying so is more useful than silently dropping it. */
+    info->dt_corrupt = 0U;
+    for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
+    {
+      if (dt_is_image(dt) && (dt != info->image_dt) && (dt_count[dt] != 0U))
+      {
+        info->dt_corrupt += dt_count[dt];
+      }
     }
   }
 }
@@ -882,7 +1167,7 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
     printf("CSI: trying the known-good setting first (%u Mbit/s, %u lanes)\n",
            (unsigned)candidate.mbps, (unsigned)candidate.lanes);
 
-    if (csi_probe_wait_for_link(&candidate, 3000U, true))
+    if (csi_probe_wait_for_link(&candidate, 0U))
     {
       *phy = candidate;
     }
@@ -895,6 +1180,16 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
   /* Re-measure the chosen setting over a longer window so the per-channel frame
      rate is worth printing. */
   (void)csi_probe_observe(phy, window_ms, true, &result);
+
+  if (result.source_boot_ms == 0U)
+  {
+    printf("CSI: the source never started; nothing to characterise\n");
+    return;
+  }
+  printf("CSI: source transmitting %lu ms after its restart\n",
+         (unsigned long)(result.source_boot_ms - 1U));
+
+  g_last_result = result;
 
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
@@ -911,9 +1206,11 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
     csi_probe_geometry(vc, &info[vc]);
   }
 
-  /* Leave the receiver on the setting that was characterised, with each present
-     channel configured for the format it actually carries. */
-  (void)csi_probe_apply_phy(phy);
+  /* Leave each present channel configured for the format it actually carries.
+     The D-PHY is deliberately not re-applied here: it already holds this setting
+     and the link is up, so touching it would reset the receiver and cost another
+     power-cycle for no gain. Only the per-channel format registers are written,
+     which the transmitter never sees. */
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
     if (info[vc].present)
@@ -922,11 +1219,6 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
                                        csi_probe_dt_bpp_code(info[vc].image_dt));
     }
   }
-
-  /* That last apply put the D-PHY through reset, which drops the link. Restart
-     the source once more so whatever runs next - normally the preview - finds a
-     transmitter that came up after the receiver. */
-  csi_probe_source_restart(CSI_SOURCE_BOOT_MS);
 }
 
 void csi_probe_print_report(const csi_probe_phy_t *phy,
@@ -941,6 +1233,21 @@ void csi_probe_print_report(const csi_probe_phy_t *phy,
   printf("D-PHY : %u Mbit/s per lane, %u lane(s), %s mapping\n",
          (unsigned)phy->mbps, (unsigned)phy->lanes,
          (phy->swapped != 0U) ? "inverted" : "physical");
+
+  if ((g_last_result.err_ecc | g_last_result.err_crc | g_last_result.err_phy) != 0U)
+  {
+    printf("Link  : MARGINAL - ecc %lu uncorrectable / %lu corrected, crc %lu, dphy %lu\n",
+           (unsigned long)g_last_result.err_ecc,
+           (unsigned long)g_last_result.err_ecc_corrected,
+           (unsigned long)g_last_result.err_crc,
+           (unsigned long)g_last_result.err_phy);
+    printf("        Try the neighbouring bitrate profiles and compare these counts;\n");
+    printf("        an uncorrectable header ECC error changes the data type value.\n");
+  }
+  else
+  {
+    printf("Link  : clean, no ecc/crc/dphy errors during the window\n");
+  }
 
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
@@ -966,6 +1273,16 @@ void csi_probe_print_report(const csi_probe_phy_t *phy,
       printf(" -> %lux%lu", (unsigned long)info[vc].width, (unsigned long)info[vc].lines);
     }
     printf("\n");
+
+    if (info[vc].dt_corrupt != 0U)
+    {
+      /* Other image data types were seen. On a clean link that would mean the
+         source really sends two of them; here it almost always means corrupted
+         headers, so give the ratio rather than a verdict. */
+      printf("        data type seen %lu times, %lu other image types "
+             "(header corruption unless the source really sends both)\n",
+             (unsigned long)info[vc].image_dt_count, (unsigned long)info[vc].dt_corrupt);
+    }
 
     printf("        other packets:");
     for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)

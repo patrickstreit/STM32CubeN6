@@ -11,12 +11,21 @@ questions about a CSI-2 source that the STM32 does not control:
    caveat imposed by the silicon - see [Why the two channels
    alternate](#why-the-two-channels-alternate).
 
-Status: the sweep has run on hardware and produced its first result - no clock at
-any setting, which turned out to be a **start-order** problem rather than a
-bitrate one; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
-The characterisation and preview stages have not yet been exercised against a
-live link. Everything below that is a measurement rather than a datasheet fact is
-marked as such.
+Status, from two hardware sessions so far:
+
+- A link exists at **1250 Mbit/s per lane, 2 lanes, physical mapping** - clock,
+  lane sync and a first frame, in that order. It is **marginal**: uncorrectable
+  header ECC, payload CRC and D-PHY SOT errors all appear. `refine` is the
+  command for picking a better profile.
+- The failure that produced no clock at any of 72 settings was **start order**,
+  not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
+- The source takes **6 to 8 s** to start transmitting after a restart. Every
+  wait for it is a timeout that ends on the clock, never a fixed delay.
+- The characterisation and preview stages have not yet been exercised against a
+  healthy link.
+
+Everything below that is a measurement rather than a datasheet fact is marked as
+such.
 
 ---
 
@@ -87,9 +96,11 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 
 | Command | Effect |
 | --- | --- |
-| `link [ms] [manual]` | apply the current setting, restart the source, report when clock, lane sync and frames appear. **Start here.** |
-| `power` | cycle the source's power and reset lines |
-| `scan [ms] [fast]` | sweep lanes/mapping/bitrate; `fast` skips the per-combination source restart |
+| `link [ms]` | apply the current setting, get the source restarted, report when clock, lane sync and frames appear. **Start here.** |
+| `refine [n]` | compare the n bitrate profiles either side of the current one, keep the quietest |
+| `source manual\|auto` | who restarts the source; manual is the default |
+| `power` | drive EN_CAM / NRST_CAM once, whatever the mode |
+| `scan [ms] [slow]` | sweep lanes/mapping/bitrate; `slow` restarts the source per combination |
 | `probe [mbps]` | characterise; without an argument it tries the known-good setting first, then sweeps |
 | `phy <mbps> [lanes] [swap]` | apply one D-PHY setting directly, no probing |
 | `dt <vc>` | identify the data types on one virtual channel |
@@ -124,8 +135,18 @@ both presence and frame rate.
 **Data type** - `CSI_ERR1` reports the data type *and* the virtual channel of any
 packet the receiver could not match to a configured filter. So the probe narrows
 the channel's filter to data type `0x30` (CSI-2 reserved, nothing sends it), and
-every arriving packet then names itself. The set collected over the window is the
-set of data types the source actually transmits.
+every arriving packet then names itself.
+
+The winner is the long-packet type that arrived **most often**, not the first one
+seen. On a marginal link that distinction matters: a header ECC error the
+receiver cannot correct changes the data type value, and RAW10 (`0x2b`) corrupted
+into `0x2f` is indistinguishable from a real data type on a single observation.
+The genuine one dominates by orders of magnitude. When other image types show up
+at all, the report prints both counts rather than hiding the ambiguity.
+
+That failure mode was observed: with the link up but noisy, `CSI_ERR1` reported
+`CECCDTERR = 0x2b` (corrected ECC on RAW10) while `CRCDTERR` and `IDDTERR` both
+said `0x2f` - one bit away from `0x2b`.
 
 **Geometry** - `CSI_LB0CFGR` fires a status flag when a nominated
 (line, byte) position is reached inside a frame. Whether a frame reaches line N
@@ -211,13 +232,35 @@ once per combination. Without restarting the source each time, a sweep cannot
 find anything even when the settings are right - which is exactly what the first
 hardware run showed: `clk -` in all 72 rows, no clock at any bitrate.
 
-So the probe now cycles the source's power and reset lines after the receiver is
-configured, in `csi_probe_observe()`, `csi_probe_wait_for_link()` and at the end
-of `csi_probe_run()`. `scan fast` opts out for a source that keeps streaming
-across a receiver reset.
+### Who restarts the source
 
-`link` is the command to reach for first. It applies the current setting,
-restarts the source, and reports when each stage appeared:
+`source manual` (**the default**) prints a prompt and waits for the clock to
+appear. A source on a bench supply has no line back to the board, so this is the
+realistic case; the wait is a timeout of 90 s, not a delay, and ends the moment
+there is a clock.
+
+`source auto` drives EN_CAM / NRST_CAM instead. That only reaches a module
+powered from the camera connector.
+
+Two consequences of the manual default:
+
+- **`scan slow` degrades to one restart up front.** A restart per combination
+  means 84 power-cycles by hand, which is not a workflow. The probe says so and
+  falls back rather than starting something nobody will finish. Whether the sweep
+  is meaningful afterwards is visible in its own output: if only the first rows
+  carry frames, the receiver cannot re-acquire a free-running transmitter and the
+  sweep is not a usable instrument for this source.
+- **`refine` is the tool for choosing a bitrate.** It walks the few profiles
+  around the current one - five power-cycles, not eighty-four - and ranks them by
+  error count. That is the question worth asking once a link exists at all.
+
+The probe also avoids prompting when it does not need to: `csi_probe_apply_phy()`
+is a no-op when the requested setting is already programmed, and a restart is
+only requested if the D-PHY was actually reprogrammed or there is no clock. A
+full start-up run therefore asks for one power-cycle, not three.
+
+`link` is the command to reach for first. It applies the current setting, gets
+the source restarted, and reports when each stage appeared:
 
 ```
 CSI: clock active after 812 ms, lane sync after 815 ms, first frame after 851 ms

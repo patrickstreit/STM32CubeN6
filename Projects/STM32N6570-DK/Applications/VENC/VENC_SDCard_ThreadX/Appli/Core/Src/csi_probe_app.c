@@ -131,14 +131,18 @@ static void preview_best_effort(void)
 static void print_help(void)
 {
   printf("CTRL: commands\n"
-         "  link [ms] [manual] apply the current setting, restart the source and\n"
-         "                     report when clock, lane sync and frames appear\n"
-         "                     'manual' skips the restart so you can do it yourself\n"
-         "  power              cycle the source's power and reset lines\n"
-         "  scan [ms] [fast]   sweep lanes/mapping/bitrate; 'fast' skips the source\n"
-         "                     restart per combination, which is much quicker but\n"
-         "                     only works if the source keeps streaming across a\n"
-         "                     receiver reset\n"
+         "  link [ms]          apply the current setting, get the source restarted\n"
+         "                     and report when clock, lane sync and frames appear\n"
+         "  refine [n]         compare the n bitrate profiles either side of the\n"
+         "                     current one and keep the quietest (default 2)\n"
+         "  source manual|auto who restarts the source. manual is the default: the\n"
+         "                     probe prompts and waits for the clock. auto drives\n"
+         "                     EN_CAM/NRST_CAM, which only reaches a module powered\n"
+         "                     from the camera connector\n"
+         "  power              drive EN_CAM/NRST_CAM once, whatever the mode\n"
+         "  scan [ms] [slow]   sweep lanes/mapping/bitrate. 'slow' restarts the\n"
+         "                     source per combination; otherwise it is restarted\n"
+         "                     once up front\n"
          "  probe [mbps]       characterise; without an argument it tries the\n"
          "                     known-good setting and then sweeps\n"
          "  phy <mbps> [lanes] [swap]   apply one D-PHY setting without probing\n"
@@ -188,19 +192,42 @@ static void handle_command(char *line)
     {
       g_phy = csi_probe_default_phy;
     }
-    (void)csi_probe_wait_for_link(&g_phy, arg_u32(line, 0U, 5000U), !arg_has(line, "manual"));
+    (void)csi_probe_wait_for_link(&g_phy, arg_u32(line, 0U, 0U));
+  }
+  else if (strncmp(line, "refine", 6) == 0)
+  {
+    csi_preview_stop();
+    if (g_phy.mbps == 0U)
+    {
+      g_phy = csi_probe_default_phy;
+    }
+    (void)csi_probe_refine(&g_phy, arg_u32(line, 0U, 2U), 400U);
+  }
+  else if (strncmp(line, "source", 6) == 0)
+  {
+    if (arg_has(line, "auto"))
+    {
+      csi_probe_set_source_mode(CSI_SOURCE_AUTO);
+    }
+    else if (arg_has(line, "manual"))
+    {
+      csi_probe_set_source_mode(CSI_SOURCE_MANUAL);
+    }
+    printf("CTRL: source mode is %s\n",
+           (csi_probe_get_source_mode() == CSI_SOURCE_AUTO)
+             ? "auto (EN_CAM/NRST_CAM)" : "manual (operator power-cycles)");
   }
   else if (strcmp(line, "power") == 0)
   {
-    printf("CTRL: cycling the source's power and reset lines\n");
+    printf("CTRL: driving EN_CAM/NRST_CAM\n");
     csi_probe_source_restart(0U);
-    printf("CTRL: done; the source needs a moment to boot\n");
+    printf("CTRL: done; this only reaches a module powered from the camera connector\n");
   }
   else if (strncmp(line, "scan", 4) == 0)
   {
     csi_preview_stop();
     /* The winner lands in g_phy so a following bare "probe" characterises it. */
-    (void)csi_probe_scan(arg_u32(line, 0U, 150U), !arg_has(line, "fast"), &g_phy);
+    (void)csi_probe_scan(arg_u32(line, 0U, 150U), arg_has(line, "slow"), &g_phy);
   }
   else if (strncmp(line, "probe", 5) == 0)
   {
@@ -313,8 +340,10 @@ void csi_probe_thread_func(ULONG arg)
 
   printf("\nCSI-2 probe application\n");
   printf("Trying the known-good setting, then sweeping if that finds nothing.\n");
-  printf("The source is power-cycled after the receiver is configured, which is the\n");
-  printf("order a D-PHY transmitter needs to be picked up.\n");
+  printf("The source has to be power-cycled *after* the receiver is configured -\n");
+  printf("that is the order a D-PHY transmitter needs to be picked up. You will be\n");
+  printf("prompted for it; 'source auto' instead drives EN_CAM/NRST_CAM, which only\n");
+  printf("reaches a module powered from the camera connector.\n");
 
   g_phy.mbps  = 0U;   /* 0 = known-good first, then sweep */
   g_phy.lanes = 2U;

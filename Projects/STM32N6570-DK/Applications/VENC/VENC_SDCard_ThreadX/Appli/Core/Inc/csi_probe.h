@@ -50,6 +50,14 @@ typedef struct
   uint32_t vc_state_mask;            /*!< bit n: VCn reached the active state       */
   uint32_t sr0;                      /*!< sticky OR of CSI_SR0 over the window      */
   uint32_t sr1;                      /*!< sticky OR of CSI_SR1 over the window      */
+  uint32_t source_boot_ms;           /*!< time from source restart to clock, 0 = never */
+  /* Polling samples in which the flag was set, not packet counts. Only useful as
+     a relative measure between settings observed for the same window length -
+     which is exactly what picking a bitrate profile needs. */
+  uint32_t err_ecc;                  /*!< uncorrectable header ECC errors */
+  uint32_t err_ecc_corrected;        /*!< corrected header ECC errors     */
+  uint32_t err_crc;                  /*!< payload CRC errors              */
+  uint32_t err_phy;                  /*!< D-PHY SOT/escape/control errors */
 } csi_probe_result_t;
 
 /** What one virtual channel turned out to carry. */
@@ -61,6 +69,9 @@ typedef struct
   uint32_t dt_mask_lo;               /*!< observed data types 0..31,  bit = DT      */
   uint32_t dt_mask_hi;               /*!< observed data types 32..63, bit = DT - 32 */
   uint32_t image_dt;                 /*!< the long-packet data type, 0 if unknown   */
+  uint32_t image_dt_count;           /*!< how often it was observed                 */
+  uint32_t dt_corrupt;               /*!< observations of other image data types,
+                                          i.e. headers the ECC could not repair    */
   uint32_t lines;                    /*!< lines per frame, 0 if not measured        */
   uint32_t bytes_per_line;           /*!< payload bytes per line, 0 if not measured */
   uint32_t width;                    /*!< derived from bytes_per_line and image_dt  */
@@ -70,26 +81,64 @@ typedef struct
 extern const csi_probe_phy_t csi_probe_default_phy;
 
 /**
-  * @brief  Cycle the camera connector's power and reset lines.
-  * @param  settle_ms  time to wait afterwards for the source to boot
-  * @note   Order matters. A D-PHY transmitter that starts while the receiver is
-  *         still in reset is never picked up, and every bitrate change puts the
-  *         receiver through reset, so the source has to be restarted after the
-  *         receiver is configured - not before.
+  * How the CSI-2 source gets restarted.
+  *
+  * Order matters either way: a D-PHY transmitter that starts while the receiver
+  * is still in reset is never picked up, and every bitrate change puts the
+  * receiver through reset. So the source has to come up *after* the receiver.
   */
+typedef enum
+{
+  /** The operator power-cycles it. The probe prints a prompt and then waits for
+      the clock to appear. This is the default, because a source on a bench
+      supply has no line back to the board for the firmware to pull. */
+  CSI_SOURCE_MANUAL = 0,
+  /** The source hangs off the camera connector, so EN_CAM / NRST_CAM restart it. */
+  CSI_SOURCE_AUTO
+} csi_source_mode_t;
+
+void              csi_probe_set_source_mode(csi_source_mode_t mode);
+csi_source_mode_t csi_probe_get_source_mode(void);
+
+/**
+  * @brief  Restart the source - or ask for it to be restarted - and wait for its
+  *         high-speed clock to reach the receiver.
+  * @param  timeout_ms  0 for the default, which depends on the source mode
+  * @retval milliseconds from the request to the clock appearing, plus one;
+  *         0 means the clock never appeared.
+  *
+  * The wait is a timeout, not a delay: it ends as soon as there is a clock. That
+  * matters because the transmitter's start-up time is not knowable in advance -
+  * an FPGA reloads its configuration first, and a human takes even longer.
+  */
+uint32_t csi_probe_source_cycle_wait(uint32_t timeout_ms);
+
+/** @brief Drive EN_CAM / NRST_CAM regardless of the source mode, then settle. */
 void csi_probe_source_restart(uint32_t settle_ms);
 
 /**
-  * @brief  Apply @p phy, optionally restart the source, and watch the link come up.
-  * @param  timeout_ms      how long to watch
-  * @param  restart_source  cycle the source's power lines after the receiver is up
+  * @brief  Apply @p phy, get the source restarted, and watch the link come up.
+  * @param  timeout_ms  how long to watch, 0 for the source mode's default
   * @retval true if a complete frame arrived
   *
   * Reports when the high-speed clock appeared, when the lanes synchronised and
   * when the first frame ended. Those three tell apart "nothing is transmitting",
   * "wrong bitrate" and "wrong lane mapping or no frame delimiters".
   */
-bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bool restart_source);
+bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms);
+
+/**
+  * @brief  Compare the bitrate profiles around @p phy and keep the quietest.
+  * @param  phy        in/out: centre of the search, replaced by the winner
+  * @param  neighbours how many profiles to try either side
+  * @param  window_ms  observation window per profile
+  * @retval true if any profile delivered frames
+  *
+  * This is the tool for "the link is up but marginal": it needs one source
+  * restart per profile, which is a handful rather than the dozens a full sweep
+  * costs, and it reports error counts so two working settings can be ranked.
+  */
+bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window_ms);
 
 /**
   * @brief  Snap a requested per-lane bitrate to the nearest HAL D-PHY profile.
