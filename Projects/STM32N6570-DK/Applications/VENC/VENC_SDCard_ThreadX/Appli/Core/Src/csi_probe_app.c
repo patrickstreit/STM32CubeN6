@@ -1,0 +1,333 @@
+/**
+  ******************************************************************************
+  * @file    csi_probe_app.c
+  * @brief   Minimal application around csi_probe / csi_preview.
+  *
+  * Built only when CSI_PROBE_MODE is defined. It brings up the DCMIPP/CSI
+  * receiver and nothing else - no encoder, no SD card, no FileX - so the CSI-2
+  * link can be characterised and previewed on the display in isolation.
+  *
+  * On start-up it sweeps the D-PHY settings, reports what it found and, when two
+  * virtual channels are present, shows both side by side. Everything is also
+  * reachable interactively over COM1; type "help".
+  ******************************************************************************
+  */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "csi_preview.h"
+#include "csi_probe.h"
+#include "main.h"
+#include "stm32n6570_discovery.h"
+#include "stm32n6570_discovery_camera.h"
+#include "tx_api.h"
+
+#define CONSOLE_LINE_SIZE 48U
+
+extern UART_HandleTypeDef  hcom_uart[];
+extern DCMIPP_HandleTypeDef hcamera_dcmipp;
+
+static csi_probe_phy_t     g_phy;
+static csi_probe_vc_info_t g_vc[CSI_PROBE_VC_COUNT];
+
+/* ------------------------------------------------------------------------- */
+/* BSP hooks                                                                 */
+/* ------------------------------------------------------------------------- */
+
+/**
+  * @brief  Bring up the DCMIPP core only.
+  * @note   Overrides the weak BSP implementation, which would program a CSI and
+  *         pipe configuration for the IMX335. Here the CSI settings are the
+  *         unknown that the probe is about to determine, so nothing beyond
+  *         HAL_DCMIPP_Init() may be assumed.
+  */
+HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
+{
+  return HAL_DCMIPP_Init(hdcmipp);
+}
+
+void BSP_CAMERA_FrameEventCallback(uint32_t Instance)
+{
+  if (Instance == DCMIPP_PIPE1)
+  {
+    csi_preview_on_pipe1_frame();
+  }
+}
+
+void BSP_CAMERA_PipeErrorCallback(uint32_t Instance)
+{
+  printf("DCMIPP PIPE%lu error, ErrorCode=0x%08lx\n",
+         (unsigned long)Instance, (unsigned long)hcamera_dcmipp.ErrorCode);
+}
+
+void BSP_CAMERA_ErrorCallback(uint32_t Instance)
+{
+  (void)Instance;
+  printf("DCMIPP global error, ErrorCode=0x%08lx\n", (unsigned long)hcamera_dcmipp.ErrorCode);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Preview selection                                                         */
+/* ------------------------------------------------------------------------- */
+
+/** @brief Fill a preview source from what the probe measured for @p vc. */
+static bool source_from_probe(uint32_t vc, csi_preview_source_t *src)
+{
+  if ((vc >= CSI_PROBE_VC_COUNT) || !g_vc[vc].present)
+  {
+    printf("CTRL: VC%lu was not seen by the probe; run 'probe' first\n", (unsigned long)vc);
+    return false;
+  }
+  if ((g_vc[vc].width == 0U) || (g_vc[vc].lines == 0U))
+  {
+    printf("CTRL: geometry of VC%lu is unknown, cannot configure the pipe\n", (unsigned long)vc);
+    return false;
+  }
+
+  src->vc     = vc;
+  src->dt     = g_vc[vc].image_dt;
+  src->width  = g_vc[vc].width;
+  src->height = g_vc[vc].lines;
+  return true;
+}
+
+/** @brief Show whatever the probe found: two channels side by side if possible. */
+static void preview_best_effort(void)
+{
+  csi_preview_source_t src[2];
+  uint32_t found = 0U;
+
+  for (uint32_t vc = 0U; (vc < CSI_PROBE_VC_COUNT) && (found < 2U); vc++)
+  {
+    if (g_vc[vc].present && (g_vc[vc].width != 0U) && (g_vc[vc].lines != 0U))
+    {
+      if (source_from_probe(vc, &src[found]))
+      {
+        found++;
+      }
+    }
+  }
+
+  if (found >= 2U)
+  {
+    (void)csi_preview_dual(&src[0], &src[1]);
+  }
+  else if (found == 1U)
+  {
+    (void)csi_preview_single(&src[0]);
+  }
+  else
+  {
+    printf("CTRL: nothing to preview\n");
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Console                                                                   */
+/* ------------------------------------------------------------------------- */
+
+static void print_help(void)
+{
+  printf("CTRL: commands\n"
+         "  scan [ms]          sweep lanes/mapping/bitrate, print what locks\n"
+         "  probe [mbps]       characterise; without an argument it sweeps first\n"
+         "  phy <mbps> [lanes] [swap]   apply one D-PHY setting without probing\n"
+         "  dt <vc>            identify the data types on one virtual channel\n"
+         "  geom <vc>          measure lines and bytes per line of one channel\n"
+         "  single <vc>        preview one channel, centred\n"
+         "  dual <vcL> <vcR>   preview two channels side by side\n"
+         "  off                stop the preview\n"
+         "  status             CSI status registers and preview counters\n"
+         "  report             reprint the last probe result\n");
+}
+
+/** @brief Read the n-th whitespace separated argument as an unsigned number. */
+static uint32_t arg_u32(const char *line, uint32_t index, uint32_t fallback)
+{
+  const char *p = line;
+
+  /* Skip the command word, then index-1 further words. */
+  for (uint32_t i = 0U; i <= index; i++)
+  {
+    while ((*p != '\0') && (*p != ' ')) { p++; }
+    while (*p == ' ') { p++; }
+  }
+
+  if ((*p < '0') || (*p > '9'))
+  {
+    return fallback;
+  }
+  return (uint32_t)strtoul(p, NULL, 0);
+}
+
+static bool arg_has(const char *line, const char *word)
+{
+  return strstr(line, word) != NULL;
+}
+
+static void handle_command(char *line)
+{
+  if ((strcmp(line, "help") == 0) || (strcmp(line, "?") == 0))
+  {
+    print_help();
+  }
+  else if (strncmp(line, "scan", 4) == 0)
+  {
+    csi_preview_stop();
+    /* The winner lands in g_phy so a following bare "probe" characterises it. */
+    (void)csi_probe_scan(arg_u32(line, 0U, 150U), &g_phy);
+  }
+  else if (strncmp(line, "probe", 5) == 0)
+  {
+    csi_preview_stop();
+    g_phy.mbps    = (uint16_t)arg_u32(line, 0U, 0U);
+    g_phy.lanes   = (g_phy.lanes == 0U) ? 2U : g_phy.lanes;
+    csi_probe_run(&g_phy, g_vc);
+    csi_probe_print_report(&g_phy, g_vc);
+  }
+  else if (strncmp(line, "phy ", 4) == 0)
+  {
+    csi_preview_stop();
+    g_phy.mbps    = (uint16_t)arg_u32(line, 0U, 1500U);
+    g_phy.lanes   = (uint8_t)arg_u32(line, 1U, 2U);
+    g_phy.swapped = arg_has(line, "swap") ? 1U : 0U;
+    if (csi_probe_apply_phy(&g_phy) == HAL_OK)
+    {
+      printf("CTRL: D-PHY set to %u Mbit/s, %u lane(s), %s mapping\n",
+             (unsigned)g_phy.mbps, (unsigned)g_phy.lanes,
+             (g_phy.swapped != 0U) ? "inverted" : "physical");
+    }
+    else
+    {
+      printf("CTRL: applying the D-PHY setting failed\n");
+    }
+  }
+  else if (strncmp(line, "dt ", 3) == 0)
+  {
+    uint32_t vc = arg_u32(line, 0U, 0U);
+    if (vc < CSI_PROBE_VC_COUNT)
+    {
+      csi_probe_datatypes(vc, 200U, &g_vc[vc]);
+      g_vc[vc].present = (g_vc[vc].dt_mask_lo != 0U) || (g_vc[vc].dt_mask_hi != 0U);
+      csi_probe_print_report(&g_phy, g_vc);
+    }
+  }
+  else if (strncmp(line, "geom ", 5) == 0)
+  {
+    uint32_t vc = arg_u32(line, 0U, 0U);
+    if (vc < CSI_PROBE_VC_COUNT)
+    {
+      csi_probe_geometry(vc, &g_vc[vc]);
+      csi_probe_print_report(&g_phy, g_vc);
+    }
+  }
+  else if (strncmp(line, "single ", 7) == 0)
+  {
+    csi_preview_source_t src;
+    if (source_from_probe(arg_u32(line, 0U, 0U), &src))
+    {
+      (void)csi_preview_single(&src);
+    }
+  }
+  else if (strncmp(line, "dual ", 5) == 0)
+  {
+    csi_preview_source_t left;
+    csi_preview_source_t right;
+    if (source_from_probe(arg_u32(line, 0U, 0U), &left) &&
+        source_from_probe(arg_u32(line, 1U, 1U), &right))
+    {
+      (void)csi_preview_dual(&left, &right);
+    }
+  }
+  else if (strcmp(line, "off") == 0)
+  {
+    csi_preview_stop();
+    printf("CTRL: preview stopped\n");
+  }
+  else if (strcmp(line, "status") == 0)
+  {
+    csi_probe_dump_status();
+    csi_preview_print_stats();
+  }
+  else if (strcmp(line, "report") == 0)
+  {
+    csi_probe_print_report(&g_phy, g_vc);
+  }
+  else if (line[0] != '\0')
+  {
+    printf("CTRL: unknown command '%s'\n", line);
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Thread                                                                    */
+/* ------------------------------------------------------------------------- */
+
+void csi_probe_thread_func(ULONG arg)
+{
+  uint8_t  ch;
+  char     line[CONSOLE_LINE_SIZE];
+  uint32_t pos = 0U;
+
+  (void)arg;
+
+  /* No sensor is driven from the STM32: BSP_CAMERA_Init() only powers the
+     camera connector, configures the DCMIPP clocks and calls the MX_DCMIPP_Init
+     above. The CSI-2 stream is produced externally and is expected to be
+     running already. */
+  if (BSP_CAMERA_Init(0, 0, 0) != BSP_ERROR_NONE)
+  {
+    printf("CSI: BSP_CAMERA_Init failed\n");
+    Error_Handler();
+  }
+
+  BSP_LED_On(LED1);
+
+  printf("\nCSI-2 probe application\n");
+  printf("Sweeping the D-PHY settings; this takes a few seconds.\n");
+
+  g_phy.mbps  = 0U;   /* 0 = sweep */
+  g_phy.lanes = 2U;
+  csi_probe_run(&g_phy, g_vc);
+  csi_probe_print_report(&g_phy, g_vc);
+
+  preview_best_effort();
+
+  BSP_LED_On(LED2);
+  print_help();
+
+  while (1)
+  {
+    if (HAL_UART_Receive(&hcom_uart[COM1], &ch, 1U, 50U) == HAL_OK)
+    {
+      if ((ch == '\r') || (ch == '\n'))
+      {
+        line[pos] = '\0';
+        handle_command(line);
+        pos = 0U;
+      }
+      else if ((ch == '\b') || (ch == 0x7FU))
+      {
+        if (pos > 0U)
+        {
+          pos--;
+        }
+      }
+      else if (pos < (CONSOLE_LINE_SIZE - 1U))
+      {
+        line[pos++] = (char)ch;
+      }
+      else
+      {
+        pos = 0U;
+        printf("CTRL: line too long\n");
+      }
+    }
+    else
+    {
+      tx_thread_sleep(1U);
+    }
+  }
+}

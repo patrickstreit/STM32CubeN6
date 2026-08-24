@@ -39,6 +39,14 @@ add_executable(${CMAKE_PROJECT_NAME})
 set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../..)
 
 # --------------------------------------------------------------------------
+# Build variants
+# --------------------------------------------------------------------------
+# CSI_PROBE_MODE builds a minimal application that only brings up the
+# DCMIPP/CSI-2 receiver: it characterises an unknown CSI-2 source and previews
+# its virtual channels on the display. No encoder, no SD card, no FileX.
+option(CSI_PROBE_MODE "Build the minimal CSI-2 probe / preview application" OFF)
+
+# --------------------------------------------------------------------------
 # Symbols (macros) - mirrors STM32CubeIDE Appli .cproject
 # --------------------------------------------------------------------------
 set(APP_Defines
@@ -51,6 +59,10 @@ set(APP_Defines
     FX_ENABLE_EVENT_TRACE
     $<$<CONFIG:Debug>:DEBUG>
 )
+
+if(CSI_PROBE_MODE)
+    list(APPEND APP_Defines CSI_PROBE_MODE)
+endif()
 
 # --------------------------------------------------------------------------
 # Include paths
@@ -83,6 +95,25 @@ set(APP_System_Include_Dirs
 # --------------------------------------------------------------------------
 # Application sources
 # --------------------------------------------------------------------------
+set(APP_Probe_Src
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_threadx.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_probe.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_preview.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_probe_app.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/instrumentation.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32n6xx_hal_timebase_tim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32n6xx_it.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/SystemClock_Config_800MHz.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/tx_initialize_low_level.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Patch/stm32n6570_discovery_camera.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/syscalls.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sysmem.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/AZURE_RTOS/App/app_azure_rtos.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../FSBL/Src/system_stm32n6xx_fsbl.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Startup/startup_stm32n657xx.s
+)
+
 set(APP_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_filex.c
@@ -207,18 +238,33 @@ set(EVISION_LIB_DIR ${REPO_ROOT}/Middlewares/ST/STM32_ISP_Library/evision/Lib)
 # --------------------------------------------------------------------------
 # Executable wiring
 # --------------------------------------------------------------------------
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${APP_Application_Src})
-target_link_libraries(${CMAKE_PROJECT_NAME}
-    stm32_iface
-    STM32_Drivers
-    ThreadX
-    FileX
-    VideoEncoder
-    ISP_Library
-    ${EVISION_LIB_DIR}/libn6-evision-awb_gcc.a
-    ${EVISION_LIB_DIR}/libn6-evision-st-ae_gcc.a
-    ${TOOLCHAIN_LINK_LIBRARIES}
-)
+if(CSI_PROBE_MODE)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${APP_Probe_Src})
+    # The BSP camera driver still references the ISP library, so it stays linked
+    # even though the probe never starts the ISP. FileX and the encoder are gone.
+    target_link_libraries(${CMAKE_PROJECT_NAME}
+        stm32_iface
+        STM32_Drivers
+        ThreadX
+        ISP_Library
+        ${EVISION_LIB_DIR}/libn6-evision-awb_gcc.a
+        ${EVISION_LIB_DIR}/libn6-evision-st-ae_gcc.a
+        ${TOOLCHAIN_LINK_LIBRARIES}
+    )
+else()
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${APP_Application_Src})
+    target_link_libraries(${CMAKE_PROJECT_NAME}
+        stm32_iface
+        STM32_Drivers
+        ThreadX
+        FileX
+        VideoEncoder
+        ISP_Library
+        ${EVISION_LIB_DIR}/libn6-evision-awb_gcc.a
+        ${EVISION_LIB_DIR}/libn6-evision-st-ae_gcc.a
+        ${TOOLCHAIN_LINK_LIBRARIES}
+    )
+endif()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
