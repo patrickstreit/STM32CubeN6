@@ -16,8 +16,19 @@
 #include <string.h>
 
 #include "stm32n6570_discovery.h"
+#include "stm32n6570_discovery_camera.h"
 
 extern DCMIPP_HandleTypeDef hcamera_dcmipp;
+
+/* Time for the D-PHY to settle after HAL_DCMIPP_CSI_SetConfig() took it through
+   reset. Flags latched during that transition say nothing about the link, so
+   they are cleared afterwards rather than reported. */
+#define CSI_PHY_SETTLE_MS   5U
+
+/* Time given to the source to boot and start transmitting after its power and
+   reset lines were cycled. An FPGA-based transmitter has to reload its
+   configuration, so this is generous by default. */
+#define CSI_SOURCE_BOOT_MS  600U
 
 /* Bitrate of every HAL DCMIPP_CSI_PHY_BT_xxx profile, in profile order. */
 static const uint16_t csi_phy_profile_mbps[] =
@@ -31,15 +42,19 @@ static const uint16_t csi_phy_profile_mbps[] =
 };
 #define CSI_PHY_PROFILE_COUNT (sizeof(csi_phy_profile_mbps) / sizeof(csi_phy_profile_mbps[0]))
 
-/* Coarse sweep grid. A D-PHY profile tolerates a fair amount of mismatch, so
-   walking all 63 profiles would only cost time; this ladder finds the region
-   and the caller can refine around the winner with a single observation. */
+/* Coarse sweep grid. A D-PHY profile covers a frequency band rather than a
+   point, so this ladder finds the region and the caller can refine around the
+   winner. 1250 is in the list because it is the per-lane rate of a 2500 Mbit/s
+   two-lane link, which is what this board is wired to. */
 static const uint16_t csi_scan_mbps[] =
 {
-  200, 400, 600, 800, 1000, 1200, 1400, 1500, 1600, 1700, 1800, 1900,
-  2000, 2100, 2200, 2300, 2400, 2500
+  200, 400, 600, 800, 1000, 1100, 1200, 1250, 1300, 1400, 1500, 1600,
+  1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500
 };
 #define CSI_SCAN_MBPS_COUNT (sizeof(csi_scan_mbps) / sizeof(csi_scan_mbps[0]))
+
+/* Known-good starting point: the setting the encoder application uses. */
+const csi_probe_phy_t csi_probe_default_phy = { .mbps = 1250U, .lanes = 2U, .swapped = 0U };
 
 static const uint32_t vc_start_bit[CSI_PROBE_VC_COUNT] =
 { CSI_CR_VC0START, CSI_CR_VC1START, CSI_CR_VC2START, CSI_CR_VC3START };
@@ -234,14 +249,38 @@ HAL_StatusTypeDef csi_probe_apply_phy(const csi_probe_phy_t *phy)
                                                  : DCMIPP_CSI_PHYSICAL_DATA_LANES;
   csiconf.PHYBitrate      = csi_probe_bitrate_profile(phy->mbps, NULL);
 
-  return HAL_DCMIPP_CSI_SetConfig(&hcamera_dcmipp, &csiconf);
+  if (HAL_DCMIPP_CSI_SetConfig(&hcamera_dcmipp, &csiconf) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  /* SetConfig() drives the D-PHY through reset and toggles its test interface.
+     The flags that come out of that are an artefact of the reconfiguration, not
+     a property of the link, so let it settle and drop them. Without this the
+     sweep reports SOT errors on a random-looking subset of bitrates. */
+  HAL_Delay(CSI_PHY_SETTLE_MS);
+  CSI->FCR0 = 0xFFFFFFFFU;
+  CSI->FCR1 = 0xFFFFFFFFU;
+
+  return HAL_OK;
+}
+
+void csi_probe_source_restart(uint32_t settle_ms)
+{
+  /* Cycles the camera connector's power and reset lines. This has to happen
+     *after* the receiver is configured: a D-PHY transmitter that starts while
+     the receiver is still in reset is never picked up, and every bitrate change
+     puts the receiver through reset again. */
+  (void)BSP_CAMERA_HwReset(0);
+  HAL_Delay(settle_ms);
 }
 
 /* ------------------------------------------------------------------------- */
 /* Observation                                                               */
 /* ------------------------------------------------------------------------- */
 
-bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms, csi_probe_result_t *out)
+bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms,
+                       bool restart_source, csi_probe_result_t *out)
 {
   uint32_t tickstart;
   bool     any_frame = false;
@@ -278,6 +317,12 @@ bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms, csi_probe
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
     SET_BIT(CSI->CR, vc_start_bit[vc]);
+  }
+
+  /* Receiver is fully up now; only then is it worth restarting the source. */
+  if (restart_source)
+  {
+    csi_probe_source_restart(CSI_SOURCE_BOOT_MS);
   }
 
   /* Discard whatever accumulated while the channels were coming up. */
@@ -329,9 +374,41 @@ bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms, csi_probe
 /* Sweep                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/**
+  * @brief  Render one channel's frame count into @p buf.
+  * @note   "-" nothing, "12" twelve complete frames, "12!" twelve frames started
+  *         but none finished - the difference between "no data" and "data that
+  *         does not survive the link".
+  */
+static void csi_format_vc(char *buf, size_t len, uint32_t sof, uint32_t eof)
+{
+  if (eof != 0U)
+  {
+    (void)snprintf(buf, len, "%lu", (unsigned long)eof);
+  }
+  else if (sof != 0U)
+  {
+    (void)snprintf(buf, len, "%lu!", (unsigned long)sof);
+  }
+  else
+  {
+    (void)snprintf(buf, len, "-");
+  }
+}
+
 static void csi_print_scan_row(const csi_probe_result_t *r)
 {
-  printf("  %4u  %u %s | clk %c l0 %c%c l1 %c%c | vc %c%c%c%c | eof %3lu %3lu %3lu %3lu |",
+  char vc_text[CSI_PROBE_VC_COUNT][12];
+
+  for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+  {
+    csi_format_vc(vc_text[vc], sizeof(vc_text[vc]), r->sof[vc], r->eof[vc]);
+  }
+
+  /* The virtual channel state flag is deliberately not shown: it reports that a
+     channel was started, not that anything arrived on it, so it reads "all four
+     present" even on a dead link. The frame counts are the honest signal. */
+  printf("  %4u  %u %s | clk %c  l0 %c%c  l1 %c%c | %5s %5s %5s %5s |",
          (unsigned)r->phy.mbps,
          (unsigned)r->phy.lanes,
          (r->phy.swapped != 0U) ? "swap" : "norm",
@@ -340,12 +417,7 @@ static void csi_print_scan_row(const csi_probe_result_t *r)
          ((r->sr1 & CSI_SR1_SYNCDL0F) != 0U) ? 'S' : '-',
          ((r->sr1 & CSI_SR1_ACTDL1F)  != 0U) ? 'A' : '-',
          ((r->sr1 & CSI_SR1_SYNCDL1F) != 0U) ? 'S' : '-',
-         ((r->vc_state_mask & 1U) != 0U) ? '0' : '-',
-         ((r->vc_state_mask & 2U) != 0U) ? '1' : '-',
-         ((r->vc_state_mask & 4U) != 0U) ? '2' : '-',
-         ((r->vc_state_mask & 8U) != 0U) ? '3' : '-',
-         (unsigned long)r->eof[0], (unsigned long)r->eof[1],
-         (unsigned long)r->eof[2], (unsigned long)r->eof[3]);
+         vc_text[0], vc_text[1], vc_text[2], vc_text[3]);
 
   if ((r->sr1 & CSI_SR1_PHY_ERRORS) != 0U) { printf(" PHY"); }
   if ((r->sr0 & CSI_SR0_ECCERRF)    != 0U) { printf(" ECC"); }
@@ -362,17 +434,26 @@ static uint32_t csi_result_frames(const csi_probe_result_t *r)
   return r->eof[0] + r->eof[1] + r->eof[2] + r->eof[3];
 }
 
-bool csi_probe_scan(uint32_t window_ms, csi_probe_phy_t *best)
+bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *best)
 {
   csi_probe_result_t result;
-  csi_probe_phy_t    winner      = {0};
-  uint32_t           best_frames = 0U;
-  bool               best_clean  = false;
-  bool               found       = false;
+  csi_probe_phy_t    winner       = {0};
+  uint32_t           best_frames  = 0U;
+  bool               best_clean   = false;
+  bool               found        = false;
+  bool               clock_seen   = false;
+  uint32_t           combinations = CSI_SCAN_MBPS_COUNT * 4U;
 
-  printf("CSI: scanning %u bitrates x 2 lane counts x 2 mappings, %lu ms each\n",
-         (unsigned)CSI_SCAN_MBPS_COUNT, (unsigned long)window_ms);
-  printf("  mbps  ln map  | dphy activity     | vc active | frames per vc     | errors\n");
+  printf("CSI: scanning %u bitrates x 2 lane counts x 2 mappings, %lu ms each%s\n",
+         (unsigned)CSI_SCAN_MBPS_COUNT, (unsigned long)window_ms,
+         restart_source ? ", restarting the source each time" : "");
+  if (restart_source)
+  {
+    /* Each iteration pays for the reset sequence plus the source's boot time. */
+    printf("CSI: about %lu s in total\n",
+           (unsigned long)((combinations * (window_ms + CSI_SOURCE_BOOT_MS + 400U)) / 1000U));
+  }
+  printf("  mbps  ln map  | dphy activity      | frames per vc (! = no end of frame) | errors\n");
 
   for (uint32_t lanes = 2U; lanes >= 1U; lanes--)
   {
@@ -388,7 +469,12 @@ bool csi_probe_scan(uint32_t window_ms, csi_probe_phy_t *best)
         phy.lanes   = (uint8_t)lanes;
         phy.swapped = (uint8_t)swapped;
 
-        (void)csi_probe_observe(&phy, window_ms, &result);
+        (void)csi_probe_observe(&phy, window_ms, restart_source, &result);
+
+        if ((result.sr1 & CSI_SR1_ACTCLF) != 0U)
+        {
+          clock_seen = true;
+        }
 
         frames = csi_result_frames(&result);
         clean  = ((result.sr1 & CSI_SR1_PHY_ERRORS) == 0U) &&
@@ -422,8 +508,20 @@ bool csi_probe_scan(uint32_t window_ms, csi_probe_phy_t *best)
   if (!found)
   {
     printf("CSI: no virtual channel produced a complete frame at any setting.\n");
-    printf("     Check that the source is streaming and that EN_CAM/NRST_CAM are asserted;\n");
-    printf("     if the clock lane never shows 'A' the D-PHY sees no clock at all.\n");
+    if (!clock_seen)
+    {
+      /* Without a clock the bitrate is irrelevant: nothing is being transmitted,
+         or the transmitter came up before the receiver did. */
+      printf("     The D-PHY clock lane was never active, at any bitrate. That is not a\n");
+      printf("     bitrate mismatch - no high-speed clock reached the receiver at all.\n");
+      printf("     Try 'power cycle' followed by 'link', and check that the source is\n");
+      printf("     actually transmitting and that its power rail comes up.\n");
+    }
+    else
+    {
+      printf("     A clock was seen but no frame completed. Refine the bitrate around the\n");
+      printf("     rows that showed lane sync, and check the lane mapping.\n");
+    }
     return false;
   }
 
@@ -437,6 +535,122 @@ bool csi_probe_scan(uint32_t window_ms, csi_probe_phy_t *best)
     *best = winner;
   }
   return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Link watch                                                                */
+/* ------------------------------------------------------------------------- */
+
+bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bool restart_source)
+{
+  uint32_t tickstart;
+  uint32_t seen_sr0 = 0U;
+  uint32_t seen_sr1 = 0U;
+  uint32_t t_clock  = 0U;
+  uint32_t t_sync   = 0U;
+  uint32_t t_frame  = 0U;
+
+  if (phy == NULL)
+  {
+    return false;
+  }
+
+  HAL_NVIC_DisableIRQ(CSI_IRQn);
+
+  if (csi_probe_apply_phy(phy) != HAL_OK)
+  {
+    HAL_NVIC_EnableIRQ(CSI_IRQn);
+    printf("CSI: applying %u Mbit/s failed\n", (unsigned)phy->mbps);
+    return false;
+  }
+
+  for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+  {
+    (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
+    SET_BIT(CSI->CR, vc_start_bit[vc]);
+  }
+
+  printf("CSI: receiver up at %u Mbit/s, %u lane(s), %s mapping. Watching for %lu ms.\n",
+         (unsigned)phy->mbps, (unsigned)phy->lanes,
+         (phy->swapped != 0U) ? "inverted" : "physical", (unsigned long)timeout_ms);
+
+  if (restart_source)
+  {
+    printf("CSI: cycling the source's power and reset lines\n");
+    /* No settle delay here: the point of this function is to watch the link come
+       up, so the wait belongs inside the loop where it can be timed. */
+    (void)BSP_CAMERA_HwReset(0);
+  }
+  else
+  {
+    printf("CSI: power-cycle the source now if it does not start on its own\n");
+  }
+
+  CSI->FCR0 = 0xFFFFFFFFU;
+  CSI->FCR1 = 0xFFFFFFFFU;
+
+  tickstart = HAL_GetTick();
+  while ((HAL_GetTick() - tickstart) < timeout_ms)
+  {
+    uint32_t sr0     = CSI->SR0;
+    uint32_t sr1     = CSI->SR1;
+    uint32_t elapsed = HAL_GetTick() - tickstart;
+
+    if (((sr1 & CSI_SR1_ACTCLF) != 0U) && (t_clock == 0U))
+    {
+      t_clock = elapsed + 1U;
+    }
+    if (((sr1 & (CSI_SR1_SYNCDL0F | CSI_SR1_SYNCDL1F)) != 0U) && (t_sync == 0U))
+    {
+      t_sync = elapsed + 1U;
+    }
+    if (((sr0 & (CSI_SR0_EOF0F | CSI_SR0_EOF1F | CSI_SR0_EOF2F | CSI_SR0_EOF3F)) != 0U) &&
+        (t_frame == 0U))
+    {
+      t_frame = elapsed + 1U;
+    }
+
+    seen_sr0 |= sr0;
+    seen_sr1 |= sr1;
+
+    /* Keep the frame flags moving so a stalled link is distinguishable from one
+       that delivered a single frame and stopped. */
+    CSI->FCR0 = sr0 & (CSI_SR0_SOF0F | CSI_SR0_SOF1F | CSI_SR0_SOF2F | CSI_SR0_SOF3F |
+                       CSI_SR0_EOF0F | CSI_SR0_EOF1F | CSI_SR0_EOF2F | CSI_SR0_EOF3F);
+
+    if ((t_frame != 0U) && (elapsed > (t_frame + 200U)))
+    {
+      break;   /* frames are flowing, no need to sit out the whole timeout */
+    }
+  }
+
+  csi_stop_all_vc();
+  HAL_NVIC_EnableIRQ(CSI_IRQn);
+
+  printf("CSI: clock %s", (t_clock != 0U) ? "" : "never active");
+  if (t_clock != 0U) { printf("active after %lu ms", (unsigned long)(t_clock - 1U)); }
+  printf(", lane sync %s", (t_sync != 0U) ? "" : "never");
+  if (t_sync != 0U) { printf("after %lu ms", (unsigned long)(t_sync - 1U)); }
+  printf(", first frame %s", (t_frame != 0U) ? "" : "never");
+  if (t_frame != 0U) { printf("after %lu ms", (unsigned long)(t_frame - 1U)); }
+  printf("\n");
+
+  if (t_clock == 0U)
+  {
+    printf("CSI: no high-speed clock. The bitrate setting is irrelevant until this\n");
+    printf("     changes - the source is not transmitting, or its rail never came up.\n");
+  }
+  else if (t_sync == 0U)
+  {
+    printf("CSI: clock but no lane sync - this is where the bitrate setting matters.\n");
+  }
+  else if (t_frame == 0U)
+  {
+    printf("CSI: lanes in sync but no end-of-frame - check the lane mapping and\n");
+    printf("     whether the source sends frame start/end short packets.\n");
+  }
+
+  return t_frame != 0U;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -659,7 +873,20 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
 
   if (phy->mbps == 0U)
   {
-    if (!csi_probe_scan(150U, phy))
+    /* Try the setting the encoder application uses before sweeping: a sweep
+       costs a source restart per combination, and this is very often the answer.
+       The restart is what makes it work at all - the transmitter has to come up
+       after the receiver, and every bitrate change resets the receiver. */
+    csi_probe_phy_t candidate = csi_probe_default_phy;
+
+    printf("CSI: trying the known-good setting first (%u Mbit/s, %u lanes)\n",
+           (unsigned)candidate.mbps, (unsigned)candidate.lanes);
+
+    if (csi_probe_wait_for_link(&candidate, 3000U, true))
+    {
+      *phy = candidate;
+    }
+    else if (!csi_probe_scan(150U, true, phy))
     {
       return;
     }
@@ -667,7 +894,7 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
 
   /* Re-measure the chosen setting over a longer window so the per-channel frame
      rate is worth printing. */
-  (void)csi_probe_observe(phy, window_ms, &result);
+  (void)csi_probe_observe(phy, window_ms, true, &result);
 
   for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
   {
@@ -695,6 +922,11 @@ void csi_probe_run(csi_probe_phy_t *phy, csi_probe_vc_info_t info[CSI_PROBE_VC_C
                                        csi_probe_dt_bpp_code(info[vc].image_dt));
     }
   }
+
+  /* That last apply put the D-PHY through reset, which drops the link. Restart
+     the source once more so whatever runs next - normally the preview - finds a
+     transmitter that came up after the receiver. */
+  csi_probe_source_restart(CSI_SOURCE_BOOT_MS);
 }
 
 void csi_probe_print_report(const csi_probe_phy_t *phy,

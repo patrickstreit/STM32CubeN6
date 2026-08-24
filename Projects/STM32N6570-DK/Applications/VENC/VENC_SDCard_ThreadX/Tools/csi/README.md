@@ -11,8 +11,12 @@ questions about a CSI-2 source that the STM32 does not control:
    caveat imposed by the silicon - see [Why the two channels
    alternate](#why-the-two-channels-alternate).
 
-Status: **compiles and links; not yet run on hardware.** Everything below that
-is a measurement rather than a datasheet fact is marked as such.
+Status: the sweep has run on hardware and produced its first result - no clock at
+any setting, which turned out to be a **start-order** problem rather than a
+bitrate one; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
+The characterisation and preview stages have not yet been exercised against a
+live link. Everything below that is a measurement rather than a datasheet fact is
+marked as such.
 
 ---
 
@@ -52,15 +56,18 @@ Console is COM1 at 115200 8N1, same as the main application.
 
 ```
 BSP_CAMERA_Init()      power the camera connector, DCMIPP clocks, HAL_DCMIPP_Init
-csi_probe_run()        sweep -> characterise -> leave the receiver configured
+csi_probe_run()        known-good setting -> sweep if needed -> characterise
 csi_probe_print_report()
 preview_best_effort()  two channels side by side, or one centred, or nothing
 ```
 
-The sweep is 18 bitrates x 2 lane counts x 2 lane mappings at 150 ms each, so
-roughly 11 s, plus a few seconds per present virtual channel for data type and
-geometry. Expect the whole start-up sequence to take 20-30 s before the preview
-appears.
+`csi_probe_run()` first tries the setting the encoder application uses, 1250
+Mbit/s per lane over two lanes, and restarts the source against it. That is very
+often the answer, and it is worth trying first because a full sweep is expensive:
+every combination needs the source restarted, which costs its reset sequence plus
+its boot time. Only if that finds no link does it sweep all 21 bitrates x 2 lane
+counts x 2 mappings, which takes a couple of minutes and prints an estimate
+before it starts.
 
 Example of the report it prints:
 
@@ -80,8 +87,10 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 
 | Command | Effect |
 | --- | --- |
-| `scan [ms]` | sweep lanes/mapping/bitrate, print every setting that shows any activity |
-| `probe [mbps]` | characterise; without an argument it sweeps first |
+| `link [ms] [manual]` | apply the current setting, restart the source, report when clock, lane sync and frames appear. **Start here.** |
+| `power` | cycle the source's power and reset lines |
+| `scan [ms] [fast]` | sweep lanes/mapping/bitrate; `fast` skips the per-combination source restart |
+| `probe [mbps]` | characterise; without an argument it tries the known-good setting first, then sweeps |
 | `phy <mbps> [lanes] [swap]` | apply one D-PHY setting directly, no probing |
 | `dt <vc>` | identify the data types on one virtual channel |
 | `geom <vc>` | measure lines and bytes per line of one channel |
@@ -190,6 +199,61 @@ black on screen.
 
 ---
 
+## 5a. Start order: the source must come up after the receiver
+
+Observed on hardware: the link only works if the CrossLink is re-powered *after*
+the DCMIPP pipe is already running. A D-PHY transmitter that starts while the
+receiver is still in reset is never picked up.
+
+This has a consequence that is easy to miss. `HAL_DCMIPP_CSI_SetConfig()` takes
+the D-PHY through reset on **every** call, so a bitrate sweep resets the receiver
+once per combination. Without restarting the source each time, a sweep cannot
+find anything even when the settings are right - which is exactly what the first
+hardware run showed: `clk -` in all 72 rows, no clock at any bitrate.
+
+So the probe now cycles the source's power and reset lines after the receiver is
+configured, in `csi_probe_observe()`, `csi_probe_wait_for_link()` and at the end
+of `csi_probe_run()`. `scan fast` opts out for a source that keeps streaming
+across a receiver reset.
+
+`link` is the command to reach for first. It applies the current setting,
+restarts the source, and reports when each stage appeared:
+
+```
+CSI: clock active after 812 ms, lane sync after 815 ms, first frame after 851 ms
+```
+
+Those three timestamps separate the failure modes:
+
+| Symptom | Meaning |
+| --- | --- |
+| no clock | nothing is transmitting, or the rail never came up. The bitrate setting is irrelevant until this changes |
+| clock, no lane sync | this is where the bitrate profile matters |
+| lane sync, no end of frame | lane mapping, or the source sends no frame start/end short packets |
+
+`link manual` skips the automatic restart, for power-cycling by hand.
+
+### The camera reset line was never driven
+
+`BSP_CAMERA_HwReset()` initialises and writes `NRST_CAM_PORT` (GPIOC, pin 8) but
+only enables the GPIOD and GPIOO clocks - GPIOO is not used by the function at
+all, and GPIOC is left unclocked. The `HAL_GPIO_Init()` and both writes on that
+port therefore do nothing, and the camera module is never reset from firmware.
+
+In the full application the SD card driver happens to enable GPIOC first, which
+masks it. In this probe build nothing else touches GPIOC, so it does not. This is
+upstream BSP code (`Drivers/BSP/STM32N6570-DK/stm32n6570_discovery_camera.c`,
+identical there); the fix is in the project's patched copy under
+`Appli/Core/Src/Patch/`, and adds nothing but the missing clock enable.
+
+Note also that the pin comments in that function contradict the BSP header: the
+header names GPIOC/8 `NRST_CAM` and GPIOD/2 `EN_CAM`, while the comments call
+GPIOC/8 the "MB1723 2V8 signal". The write order was left exactly as upstream has
+it - only the clock was corrected - because which label is right cannot be
+settled from the source tree alone.
+
+---
+
 ## 6. Things worth knowing before debugging
 
 **Only two data lanes exist.** The HAL defines `DCMIPP_CSI_ONE_DATA_LANE` and
@@ -227,7 +291,12 @@ branch does not patch it.
 
 ## 7. Not done
 
-- Not run on hardware. Every number in the example report is illustrative.
+- The characterisation and preview stages have not been seen against a live
+  link. Every number in the example report is illustrative.
+- The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`
+  latches SOT/control flags while it drives the D-PHY through reset, which showed
+  up as `PHY` on a random-looking subset of bitrates. There is now a settle delay
+  and a flag clear after every apply, but that has not been re-measured.
 - The byte counter is assumed to count within a line when the line counter is
   fixed to 1. If `bytes/line` comes back implausible, that assumption is where to
   look; the raw value is printed alongside the derived width for exactly that

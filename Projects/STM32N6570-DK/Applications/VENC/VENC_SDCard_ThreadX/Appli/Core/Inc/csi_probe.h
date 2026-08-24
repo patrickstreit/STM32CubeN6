@@ -66,6 +66,31 @@ typedef struct
   uint32_t width;                    /*!< derived from bytes_per_line and image_dt  */
 } csi_probe_vc_info_t;
 
+/** The setting the encoder application uses: 2500 Mbit/s over two lanes. */
+extern const csi_probe_phy_t csi_probe_default_phy;
+
+/**
+  * @brief  Cycle the camera connector's power and reset lines.
+  * @param  settle_ms  time to wait afterwards for the source to boot
+  * @note   Order matters. A D-PHY transmitter that starts while the receiver is
+  *         still in reset is never picked up, and every bitrate change puts the
+  *         receiver through reset, so the source has to be restarted after the
+  *         receiver is configured - not before.
+  */
+void csi_probe_source_restart(uint32_t settle_ms);
+
+/**
+  * @brief  Apply @p phy, optionally restart the source, and watch the link come up.
+  * @param  timeout_ms      how long to watch
+  * @param  restart_source  cycle the source's power lines after the receiver is up
+  * @retval true if a complete frame arrived
+  *
+  * Reports when the high-speed clock appeared, when the lanes synchronised and
+  * when the first frame ended. Those three tell apart "nothing is transmitting",
+  * "wrong bitrate" and "wrong lane mapping or no frame delimiters".
+  */
+bool csi_probe_wait_for_link(const csi_probe_phy_t *phy, uint32_t timeout_ms, bool restart_source);
+
 /**
   * @brief  Snap a requested per-lane bitrate to the nearest HAL D-PHY profile.
   * @param  mbps          requested bitrate in Mbit/s per lane
@@ -83,15 +108,21 @@ HAL_StatusTypeDef csi_probe_apply_phy(const csi_probe_phy_t *phy);
 /**
   * @brief  Observe all four virtual channels for @p window_ms with @p phy applied.
   */
-bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms, csi_probe_result_t *out);
+bool csi_probe_observe(const csi_probe_phy_t *phy, uint32_t window_ms,
+                       bool restart_source, csi_probe_result_t *out);
 
 /**
   * @brief  Sweep lane count, lane mapping and bitrate; print a table of what locks.
-  * @param  window_ms   observation window per combination (>= 100 ms recommended)
-  * @param  best        optional out: the setting with the most frames and no D-PHY error
+  * @param  window_ms       observation window per combination (>= 100 ms recommended)
+  * @param  restart_source   cycle the source's power lines for every combination.
+  *                          Needed whenever the transmitter only synchronises if
+  *                          it starts after the receiver, which costs a reset
+  *                          sequence plus its boot time per combination.
+  * @param  best             optional out: the setting with the most frames and no
+  *                          D-PHY error
   * @retval true if at least one combination produced complete frames
   */
-bool csi_probe_scan(uint32_t window_ms, csi_probe_phy_t *best);
+bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *best);
 
 /**
   * @brief  Identify the data types carried by @p vc.

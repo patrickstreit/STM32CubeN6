@@ -131,8 +131,16 @@ static void preview_best_effort(void)
 static void print_help(void)
 {
   printf("CTRL: commands\n"
-         "  scan [ms]          sweep lanes/mapping/bitrate, print what locks\n"
-         "  probe [mbps]       characterise; without an argument it sweeps first\n"
+         "  link [ms] [manual] apply the current setting, restart the source and\n"
+         "                     report when clock, lane sync and frames appear\n"
+         "                     'manual' skips the restart so you can do it yourself\n"
+         "  power              cycle the source's power and reset lines\n"
+         "  scan [ms] [fast]   sweep lanes/mapping/bitrate; 'fast' skips the source\n"
+         "                     restart per combination, which is much quicker but\n"
+         "                     only works if the source keeps streaming across a\n"
+         "                     receiver reset\n"
+         "  probe [mbps]       characterise; without an argument it tries the\n"
+         "                     known-good setting and then sweeps\n"
          "  phy <mbps> [lanes] [swap]   apply one D-PHY setting without probing\n"
          "  dt <vc>            identify the data types on one virtual channel\n"
          "  geom <vc>          measure lines and bytes per line of one channel\n"
@@ -173,11 +181,26 @@ static void handle_command(char *line)
   {
     print_help();
   }
+  else if (strncmp(line, "link", 4) == 0)
+  {
+    csi_preview_stop();
+    if (g_phy.mbps == 0U)
+    {
+      g_phy = csi_probe_default_phy;
+    }
+    (void)csi_probe_wait_for_link(&g_phy, arg_u32(line, 0U, 5000U), !arg_has(line, "manual"));
+  }
+  else if (strcmp(line, "power") == 0)
+  {
+    printf("CTRL: cycling the source's power and reset lines\n");
+    csi_probe_source_restart(0U);
+    printf("CTRL: done; the source needs a moment to boot\n");
+  }
   else if (strncmp(line, "scan", 4) == 0)
   {
     csi_preview_stop();
     /* The winner lands in g_phy so a following bare "probe" characterises it. */
-    (void)csi_probe_scan(arg_u32(line, 0U, 150U), &g_phy);
+    (void)csi_probe_scan(arg_u32(line, 0U, 150U), !arg_has(line, "fast"), &g_phy);
   }
   else if (strncmp(line, "probe", 5) == 0)
   {
@@ -198,6 +221,9 @@ static void handle_command(char *line)
       printf("CTRL: D-PHY set to %u Mbit/s, %u lane(s), %s mapping\n",
              (unsigned)g_phy.mbps, (unsigned)g_phy.lanes,
              (g_phy.swapped != 0U) ? "inverted" : "physical");
+      /* Applying a setting resets the D-PHY, so whatever the source was doing
+         has just been lost. It has to come up again after the receiver. */
+      printf("CTRL: the receiver was reset by this; run 'link' to restart the source\n");
     }
     else
     {
@@ -286,9 +312,11 @@ void csi_probe_thread_func(ULONG arg)
   BSP_LED_On(LED1);
 
   printf("\nCSI-2 probe application\n");
-  printf("Sweeping the D-PHY settings; this takes a few seconds.\n");
+  printf("Trying the known-good setting, then sweeping if that finds nothing.\n");
+  printf("The source is power-cycled after the receiver is configured, which is the\n");
+  printf("order a D-PHY transmitter needs to be picked up.\n");
 
-  g_phy.mbps  = 0U;   /* 0 = sweep */
+  g_phy.mbps  = 0U;   /* 0 = known-good first, then sweep */
   g_phy.lanes = 2U;
   csi_probe_run(&g_phy, g_vc);
   csi_probe_print_report(&g_phy, g_vc);
