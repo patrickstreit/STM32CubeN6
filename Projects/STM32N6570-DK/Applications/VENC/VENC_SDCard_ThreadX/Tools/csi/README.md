@@ -51,6 +51,21 @@ stays as it is, because Appli compile definitions do not affect it. That also
 makes switching back to the encoder firmware a matter of running the same task
 and picking `Debug` - no FSBL reflash either way.
 
+Without VS Code, `Tools/debug/stm32n6-gdb.ps1` does build, flash and debug from a
+console. It is the same sequence as the launch configuration - ST-LINK_gdbserver,
+GDB on the FSBL, Appli symbols added on top, run to `BOOT_Application` - with the
+tool paths discovered from the STM32Cube bundle directory:
+
+```powershell
+./Tools/debug/stm32n6-gdb.ps1 -Build -FlashAppli -Preset CsiProbe
+./Tools/debug/stm32n6-gdb.ps1 -NoFsblLoad -Interactive      # attach to what is flashed
+./Tools/debug/stm32n6-gdb.ps1 -DryRun                       # print the commands, touch nothing
+```
+
+Anything passed to `-Ex` runs as a GDB command once the target is at the entry
+point; without `-Interactive` the script then detaches - which resumes the target -
+and stops the server, so it can be used non-interactively.
+
 `CsiProbe` is an Appli-only preset and has no FSBL counterpart, which is why it
 does not appear in **Flash STM32N6 VENC (FSBL + Appli)**: that task flashes both
 images from one top-level preset, where the root `CMakeLists.txt` builds
