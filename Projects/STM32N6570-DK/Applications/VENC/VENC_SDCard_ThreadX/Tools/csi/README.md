@@ -17,8 +17,14 @@ Status, from three hardware sessions so far:
   ECC, CRC or D-PHY errors over 500 ms. 1250 Mbit/s locks as well but is
   **marginal** - around 200 uncorrectable header ECC errors per 500 ms - and so
   are 1200, 1450 and 1550. 2500 is therefore the known-good setting.
-- **VC0 carries 1920x1080 RAW10 (0x2b) at 48-50 fps.** VC1 has not been seen on
-  any setting yet, so the side-by-side goal is still short of a second source.
+- **VC0 carries 1920x1080 RAW10 (0x2b) at 48-50 fps.** Confirmed twice over: by
+  the line and byte counters, and by dumping the payload - `grab` returned
+  16-bit little-endian values in the 0..1023 range, 4147200 bytes for a frame,
+  which is 1920 x 1080 pixels unpacked to 16-bit words.
+- **VC1, VC2 and VC3 carry nothing.** `vcs` sees no frame start and no long
+  packet on them, and a full data type walk on VC1 rejects nothing either -
+  there are no packets to reject. The side-by-side goal is short of a second
+  source at the transmitter, not short of a way to find it.
 - The failure that produced no clock at any of 72 settings was **start order**,
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
 - The source takes **6 to 8 s** to start transmitting after a restart. Every
@@ -493,10 +499,11 @@ now clears the flags and the HAL error code after stopping.
   candidates accept, which decides between "two streams" and "one stream, two
   matching filter values" from measurements rather than from the register map.
   That test has not been run on hardware yet.
-- The rejection-count column of the walk is **not a discriminator**. It reads
-  roughly 1050-1300 for every candidate including the correct one: it measures
-  how fast the loop polls, not how many packets were refused. It is printed
-  because that is visible in the table, not because it decides anything.
+- The rejection-count column of the walk does not discriminate **between
+  candidates**: it reads roughly 1050-1300 for every one of them including the
+  correct one, because it measures how fast the loop polls. It does discriminate
+  between **channels**, which the hardware showed: the same column on VC1 was
+  zero for all 28 candidates. Nothing was rejected there because nothing arrived.
 - `refine` takes one sample per profile. Ranking two neighbouring profiles needs
   repeats, and each repeat costs a manual power-cycle.
 - The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`

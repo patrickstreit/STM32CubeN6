@@ -17,9 +17,27 @@
 
 extern DCMIPP_HandleTypeDef hcamera_dcmipp;
 
-/* One 1920-pixel RAW10 line is 2400 bytes, so this holds around 27 of them -
-   enough to see structure without reserving a frame's worth of PSRAM. */
-#define GRAB_BUF_SIZE   (64U * 1024U)
+/* Sized for a whole 1920x1080 frame with room to spare, not for the handful of
+   lines a grab actually wants.
+
+   The reason is a measurement: the dump limit register P0DCLMTR does *not* stop
+   the write. Set to 64 kB against this source, the pipe reported 4147200 bytes
+   dumped - one full frame, 1920 x 1080 unpacked to 16-bit words - and wrote all
+   of it, straight through the 64 kB buffer and into the trace ring behind it.
+   The HAL name says as much once you know: HAL_DCMIPP_PIPE_EnableLimitEvent()
+   enables an interrupt. An event is not a wall.
+
+   So the crop below is what bounds the capture, and this size is what bounds the
+   damage if a source ever gets past it. */
+#define GRAB_BUF_SIZE   (6U * 1024U * 1024U)
+
+/* Lines to capture. Four is enough to see whether the payload repeats with a
+   line period, which is the structure that separates image data from anything
+   else, and small enough that the crop leaves plenty of headroom. */
+#define GRAB_LINES      4U
+
+/* Widest line the crop will pass, in pixels. The crop registers stop at 4094. */
+#define GRAB_MAX_PIXELS 4094U
 
 /* Neither 0x00 nor 0xFF: both are plausible payload, and a buffer that still
    reads as the fill pattern afterwards is the clearest possible "nothing was
@@ -44,6 +62,7 @@ static HAL_StatusTypeDef grab_configure(uint32_t vc, uint32_t dt)
 {
   DCMIPP_CSI_PIPE_ConfTypeDef csi_pipe = {0};
   DCMIPP_PipeConfTypeDef      pipe     = {0};
+  DCMIPP_CropConfTypeDef      crop     = {0};
 
   /* The channel accepts everything and the pipe does the selecting. That is the
      point of grabbing through PIPE0: the virtual channel filter and the pipe's
@@ -81,7 +100,24 @@ static HAL_StatusTypeDef grab_configure(uint32_t vc, uint32_t dt)
   /* PIPE0 has no pixel packer and no pitch - it writes what arrives, in order.
      HAL_DCMIPP_PIPE_SetConfig() skips both fields for this pipe. */
   pipe.FrameRate = DCMIPP_FRAME_RATE_ALL;
-  return HAL_DCMIPP_PIPE_SetConfig(&hcamera_dcmipp, DCMIPP_PIPE0, &pipe);
+  if (HAL_DCMIPP_PIPE_SetConfig(&hcamera_dcmipp, DCMIPP_PIPE0, &pipe) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  /* This is the bound on how much gets written, and the only one that holds:
+     the dump limit register raises an event but does not stop the transfer. A
+     few lines are all a hexdump needs anyway. */
+  crop.VStart   = 0U;
+  crop.HStart   = 0U;
+  crop.VSize    = GRAB_LINES;
+  crop.HSize    = GRAB_MAX_PIXELS;
+  crop.PipeArea = DCMIPP_POSITIVE_AREA;
+  if (HAL_DCMIPP_PIPE_SetCropConfig(&hcamera_dcmipp, DCMIPP_PIPE0, &crop) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+  return HAL_DCMIPP_PIPE_EnableCrop(&hcamera_dcmipp, DCMIPP_PIPE0);
 }
 
 /** @brief Print @p count bytes of @p buf as 16 per line with an ASCII column. */
@@ -121,19 +157,26 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
   if (show_bytes > GRAB_BUF_SIZE) { show_bytes = GRAB_BUF_SIZE; }
   if (show_bytes == 0U)           { show_bytes = 64U; }
 
+  /* A mismatched data type makes the receiver raise an error per packet, and the
+     BSP handler prints one line per error. Mask it for the duration, as every
+     other measurement in the probe does. */
+  HAL_NVIC_DisableIRQ(CSI_IRQn);
+
   memset(grab_buf, GRAB_FILL, sizeof(grab_buf));
   SCB_CleanDCache_by_Addr((void *)grab_buf, (int32_t)sizeof(grab_buf));
 
   if (grab_configure(vc, dt) != HAL_OK)
   {
+    HAL_NVIC_EnableIRQ(CSI_IRQn);
     printf("GRAB: could not configure PIPE0 for 0x%02lx\n", (unsigned long)dt);
     return;
   }
 
-  /* The dump limit is what makes this safe against an unknown source: the pipe
-     stops at that many 32-bit words per frame no matter how much is sent. Set
-     the register directly rather than through HAL_DCMIPP_PIPE_EnableLimitEvent(),
-     which also unmasks the limit interrupt - and there is no handler for it. */
+  /* Kept as a second opinion, not as protection: the count it reports is how
+     much the pipe pushed out, which is worth reading even though reaching the
+     limit does not stop it. Written directly rather than through
+     HAL_DCMIPP_PIPE_EnableLimitEvent(), which also unmasks an interrupt that
+     has no handler here. */
   WRITE_REG(hcamera_dcmipp.Instance->P0DCLMTR,
             ((GRAB_BUF_SIZE / 4U) << DCMIPP_P0DCLMTR_LIMIT_Pos) | DCMIPP_P0DCLMTR_ENABLE);
 
@@ -142,6 +185,7 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
   if (HAL_DCMIPP_CSI_PIPE_Start(&hcamera_dcmipp, DCMIPP_PIPE0, vc,
                                 (uint32_t)grab_buf, DCMIPP_MODE_SNAPSHOT) != HAL_OK)
   {
+    HAL_NVIC_EnableIRQ(CSI_IRQn);
     printf("GRAB: PIPE0 refused to start on VC%lu (CMCR=0x%08lx, pipe state %d)\n",
            (unsigned long)vc, (unsigned long)hcamera_dcmipp.Instance->CMCR,
            (int)hcamera_dcmipp.PipeState[DCMIPP_PIPE0]);
@@ -161,13 +205,24 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
   counter = READ_REG(hcamera_dcmipp.Instance->P0DCCNTR) & DCMIPP_P0DCCNTR_CNT;
 
   (void)HAL_DCMIPP_CSI_PIPE_Stop(&hcamera_dcmipp, DCMIPP_PIPE0, vc);
+  (void)HAL_DCMIPP_PIPE_DisableCrop(&hcamera_dcmipp, DCMIPP_PIPE0);
   CLEAR_BIT(hcamera_dcmipp.Instance->P0DCLMTR, DCMIPP_P0DCLMTR_ENABLE);
+  HAL_NVIC_EnableIRQ(CSI_IRQn);
 
   grab_invalidate(grab_buf, sizeof(grab_buf));
 
-  printf("GRAB: VC%lu 0x%02lx (%s): %lu byte(s) dumped, frame %s\n",
+  printf("GRAB: VC%lu 0x%02lx (%s): %lu byte(s) dumped over %u cropped line(s), frame %s\n",
          (unsigned long)vc, (unsigned long)dt, csi_probe_dt_name(dt),
-         (unsigned long)counter, frame_done ? "complete" : "did not complete");
+         (unsigned long)counter, (unsigned)GRAB_LINES,
+         frame_done ? "complete" : "did not complete");
+
+  if (counter > GRAB_BUF_SIZE)
+  {
+    /* Say it rather than print a hexdump of a buffer that was written past. */
+    printf("      the pipe pushed out more than the %lu-byte buffer holds - the\n"
+           "      crop did not bound it and memory behind the buffer was hit\n",
+           (unsigned long)GRAB_BUF_SIZE);
+  }
 
   if (counter == 0U)
   {

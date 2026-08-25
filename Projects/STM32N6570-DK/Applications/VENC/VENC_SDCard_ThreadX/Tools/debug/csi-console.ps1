@@ -17,6 +17,10 @@
   Console commands to send, in order. Nothing is sent if empty - the script then
   just listens, which is the way to watch a boot banner.
 
+.PARAMETER Sequence
+  The same commands as one semicolon-separated string. Use this when the script is
+  started with powershell.exe -File, which cannot pass an array.
+
 .PARAMETER IdleMs
   How long the board has to stay quiet before the next command is sent. Default
   8000, which clears the gap between the data type walk and the geometry search.
@@ -36,12 +40,22 @@ param(
   [string]   $Port       = 'COM16',
   [int]      $Baud       = 115200,
   [string[]] $Commands   = @(),
+  [string]   $Sequence,
   [int]      $IdleMs     = 8000,
+  [int]      $CharDelayMs = 3,
   [int]      $MaxSeconds = 180,
   [string]   $Log
 )
 
 $ErrorActionPreference = 'Stop'
+
+# powershell.exe -File flattens an array parameter into one comma-joined string,
+# so a caller that cannot use -Command has no way to pass -Commands. -Sequence is
+# that way in: one string, semicolons between commands.
+if ($Sequence)
+{
+  $Commands = $Sequence -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
 
 $serial = New-Object System.IO.Ports.SerialPort $Port, $Baud, 'None', 8, 'One'
 $serial.ReadTimeout  = 200
@@ -91,7 +105,18 @@ try
     {
       Write-Host "`n----- > $command"
       [void]$transcript.AppendLine("----- > $command")
-      $serial.Write("$command`r")
+
+      # One character at a time, with a gap. The probe's console reads a single
+      # byte per HAL_UART_Receive() call with no FIFO and no interrupt, so a
+      # burst arriving while it is printing loses characters - which showed up
+      # as commands like '4probe 2500' and 'gstatus', the leftovers of an
+      # earlier line mixed into the next one.
+      foreach ($ch in $command.ToCharArray())
+      {
+        $serial.Write([string]$ch)
+        Start-Sleep -Milliseconds $CharDelayMs
+      }
+      $serial.Write("`r")
       Read-Until-Idle -IdleMs $IdleMs -MaxSeconds $MaxSeconds
     }
   }
