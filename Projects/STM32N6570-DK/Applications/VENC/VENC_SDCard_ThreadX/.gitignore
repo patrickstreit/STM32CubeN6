@@ -1,1 +1,3 @@
 build
+# Console transcripts written by Tools/debug/csi-console.ps1
+Tools/csi/last-session.log
