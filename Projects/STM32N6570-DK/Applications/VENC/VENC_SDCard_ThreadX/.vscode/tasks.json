@@ -2,7 +2,10 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Flash STM32N6 VENC (Debug)",
+            // Both images from the same top-level preset. The root CMakeLists
+            // drives the two sub-builds into FSBL/build/${CMAKE_BUILD_TYPE} and
+            // Appli/build/${CMAKE_BUILD_TYPE}, so one name covers both.
+            "label": "Flash STM32N6 VENC (FSBL + Appli)",
             "type": "shell",
             "command": "cube",
             "args": [
@@ -13,18 +16,23 @@
                 "-el",
                 "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/Debug/VENC_SDCard_ThreadX_FSBL-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/${input:topLevelPreset}/VENC_SDCard_ThreadX_FSBL-trusted.bin",
                 "0x70000000",
                 "-v",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/Debug/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/${input:topLevelPreset}/VENC_SDCard_ThreadX_Appli-trusted.bin",
                 "0x70100000",
                 "-v"
             ],
             "problemMatcher": []
         },
         {
-            "label": "Flash STM32N6 VENC (DebugWithOptions)",
+            // Rewrites only the application slot at 0x70100000 and leaves the FSBL
+            // in place. This is the task for the Appli-only presets such as
+            // CsiProbe, which have no FSBL counterpart: the first-stage bootloader
+            // is unaffected by Appli compile definitions, so switching between the
+            // encoder firmware and the CSI probe only needs this half reflashed.
+            "label": "Flash STM32N6 VENC (Appli only)",
             "type": "shell",
             "command": "cube",
             "args": [
@@ -35,11 +43,7 @@
                 "-el",
                 "${env:STM32_PRG_PATH}/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
                 "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/FSBL/build/DebugWithOptions/VENC_SDCard_ThreadX_FSBL-trusted.bin",
-                "0x70000000",
-                "-v",
-                "-d",
-                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/DebugWithOptions/VENC_SDCard_ThreadX_Appli-trusted.bin",
+                "${workspaceFolder:VENC_SDCard_ThreadX}/Appli/build/${input:appliPreset}/VENC_SDCard_ThreadX_Appli-trusted.bin",
                 "0x70100000",
                 "-v"
             ],
@@ -56,6 +60,36 @@
                 "env:CUBE_BUNDLE_PATH:               | ${env:CUBE_BUNDLE_PATH}",
             ],
             "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            // Preset names from ./CMakePresets.json. They end up as
+            // CMAKE_BUILD_TYPE and therefore as the sub-build directory names.
+            "id": "topLevelPreset",
+            "type": "pickString",
+            "description": "Preset to flash (FSBL + Appli)",
+            "options": [
+                "Debug",
+                "DebugWithOptions",
+                "Release"
+            ],
+            "default": "Debug"
+        },
+        {
+            // Preset names from Appli/CMakePresets.json, whose binaryDir is
+            // build/${presetName}. DebugWithOptions is listed as well because the
+            // top-level build produces that directory too.
+            "id": "appliPreset",
+            "type": "pickString",
+            "description": "Appli preset to flash",
+            "options": [
+                "Debug",
+                "CsiProbe",
+                "DebugWithOptions",
+                "Release"
+            ],
+            "default": "CsiProbe"
         }
     ]
 }

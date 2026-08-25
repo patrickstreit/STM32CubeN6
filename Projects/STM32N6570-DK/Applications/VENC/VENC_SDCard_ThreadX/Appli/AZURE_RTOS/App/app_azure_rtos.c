@@ -46,13 +46,25 @@ UCHAR tracex_buffer[TRACEX_BUFFER_SIZE];
 __ALIGN_BEGIN static UCHAR tx_byte_pool_buffer[TX_APP_MEM_POOL_SIZE] __ALIGN_END;
 TX_BYTE_POOL tx_app_byte_pool;
 
+#if defined (CSI_PROBE_MODE)
+TX_THREAD csi_probe_thread;
+#else
 TX_THREAD venc_thread;
 TX_THREAD sdcard_thread;
 TX_THREAD debug_control_thread;
+#endif
 
 /* Private function prototypes -----------------------------------------------*/
 
 void     Error_Handler(void);
+
+#if defined (CSI_PROBE_MODE)
+__weak void csi_probe_thread_func(ULONG arg)
+{
+  while(1);
+}
+#endif
+
 __weak void venc_thread_func(ULONG arg)
 {
   while(1);
@@ -98,6 +110,24 @@ VOID tx_application_define(VOID *first_unused_memory)
     Error_Handler();
     
   }
+#if defined (CSI_PROBE_MODE)
+  else
+  {
+    /* The probe application replaces the whole encoder/storage pipeline: one
+       thread that characterises the CSI-2 link and drives the preview. */
+    void *thread_stack_pointer;
+    if(tx_byte_allocate(&tx_app_byte_pool, &thread_stack_pointer, 4000, TX_NO_WAIT) != TX_SUCCESS){
+      Error_Handler();
+    }
+
+    status = tx_thread_create(&csi_probe_thread, "CSI Probe Thread", csi_probe_thread_func, 0,
+                              thread_stack_pointer, 4000, 12, 12, TX_NO_TIME_SLICE, TX_AUTO_START);
+    if(status != TX_SUCCESS)
+    {
+      Error_Handler();
+    }
+  }
+#else
   else
   {
     monitor_thread_create();
@@ -137,5 +167,6 @@ VOID tx_application_define(VOID *first_unused_memory)
       Error_Handler();
     }
 
-  }  
+  }
+#endif /* CSI_PROBE_MODE */
 }

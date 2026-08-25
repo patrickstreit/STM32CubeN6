@@ -1469,9 +1469,18 @@ int32_t BSP_CAMERA_HwReset(uint32_t Instance)
   int32_t ret = BSP_ERROR_NONE;
   GPIO_InitTypeDef gpio_init_structure = {0};
 
-  /* Enable GPIO clocks */
-  __HAL_RCC_GPIOO_CLK_ENABLE(); // EN Cam
-  __HAL_RCC_GPIOD_CLK_ENABLE(); // NRST Cam
+  /* Enable GPIO clocks.
+     Upstream enables GPIOO (which this function never touches) and leaves GPIOC
+     unclocked, so the HAL_GPIO_Init() and the writes on NRST_CAM_PORT (= GPIOC,
+     pin 8) below have no effect: that line is simply never driven. In the full
+     application the SD card driver happens to enable GPIOC first, which hides
+     the problem; in a build without it the camera module is never reset from
+     firmware and has to be power-cycled by hand.
+     Note that the pin comments further down contradict the BSP header: the
+     header names GPIOC/8 NRST_CAM and GPIOD/2 EN_CAM. The write order is left
+     exactly as upstream has it, only the clocks are corrected. */
+  __HAL_RCC_GPIOC_CLK_ENABLE(); /* NRST_CAM_PORT */
+  __HAL_RCC_GPIOD_CLK_ENABLE(); /* EN_CAM_PORT   */
 
   if (Instance >= CAMERA_INSTANCES_NBR)
   {

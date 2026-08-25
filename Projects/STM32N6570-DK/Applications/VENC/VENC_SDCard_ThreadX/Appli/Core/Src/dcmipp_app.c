@@ -57,13 +57,20 @@ HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
     return HAL_ERROR;
   }
 
-  /* Configure the CSI : external CrossLink source, 2 lanes, ~1250 Mbit/s/lane.
+  /* Configure the CSI : external CrossLink source, 2 lanes, 2500 Mbit/s/lane.
      NOTE: the STM32N6 DCMIPP/CSI-2 D-PHY receiver only supports 2 data lanes
      (HAL only defines DCMIPP_CSI_TWO_DATA_LANES; there is no 4-lane HAL value/register
-     encoding). Requested 4 lanes could not be configured; kept at 2 lanes - see report. */
+     encoding). Requested 4 lanes could not be configured; kept at 2 lanes - see report.
+
+     2500 rather than the 1250 this used to be, and that is a measurement rather
+     than a preference: the CSI probe (Tools/csi/README.md) found 1250 marginal
+     against this source - around 200 uncorrectable header ECC errors per 500 ms,
+     and the same for 1200, 1450 and 1550 - while 2500 runs 500 ms with no ECC,
+     CRC or D-PHY error at all. An uncorrectable header ECC error changes the
+     data type value, so a marginal link does not degrade gracefully here. */
   csiconf.DataLaneMapping = DCMIPP_CSI_PHYSICAL_DATA_LANES;
   csiconf.NumberOfLanes   = DCMIPP_CSI_TWO_DATA_LANES;
-  csiconf.PHYBitrate      = DCMIPP_CSI_PHY_BT_1250;
+  csiconf.PHYBitrate      = DCMIPP_CSI_PHY_BT_2500;
   HAL_DCMIPP_CSI_SetConfig(hdcmipp, &csiconf);
 
   /* Configure the Virtual Channel 0 */
@@ -101,8 +108,13 @@ HAL_StatusTypeDef MX_DCMIPP_Init(DCMIPP_HandleTypeDef *hdcmipp)
   /* RAW Bayer -> RGB demosaic (pure DCMIPP hardware block, no sensor/I2C access).
      This was previously configured by the ISP middleware (ISP_Start -> P1DMCR);
      it is mandatory ahead of the YUV conversion below, else the Bayer mosaic is
-     never resolved and no valid image is produced. Bayer pattern assumed RGGB
-     (same as the previous IMX335 config) - adjust if the CrossLink output differs. */
+     never resolved and no valid image is produced.
+
+     RGGB is confirmed against this source, not inherited from the IMX335 any
+     more: all four patterns were stepped through on a live picture with the
+     probe firmware's 'bayer' command and only RGGB puts red and blue in the
+     right place. Nothing in a CSI-2 stream states the pattern, so looking at
+     the picture is the only way to decide it. */
   DCMIPP_RawBayer2RGBConfTypeDef bayer_conf = {
     .RawBayerType  = DCMIPP_RAWBAYER_RGGB,
     .PeakStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_4,

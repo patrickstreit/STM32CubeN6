@@ -7,8 +7,7 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
             "toolchainFile": "${sourceDir}/../gcc-arm-none-eabi.cmake",
-            "cacheVariables": {
-            }
+            "cacheVariables": {}
         },
         {
             "name": "Debug",
@@ -23,6 +22,14 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "CsiProbe",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CSI_PROBE_MODE": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -33,6 +40,10 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "CsiProbe",
+            "configurePreset": "CsiProbe"
         }
     ]
 }
