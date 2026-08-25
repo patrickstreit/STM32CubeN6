@@ -245,6 +245,44 @@ once per combination. Without restarting the source each time, a sweep cannot
 find anything even when the settings are right - which is exactly what the first
 hardware run showed: `clk -` in all 72 rows, no clock at any bitrate.
 
+### Why the restart is unavoidable from this side
+
+It is **not** a missing back-channel. CSI-2 high-speed traffic is strictly
+one-way and source-synchronous: the receiver has no protocol path to ask the
+transmitter for anything. The bidirectional parts of D-PHY - low-power escape,
+ULPS, lane turnaround - are optional and unused here, and there is no CCI/I2C
+link to the CrossLink either. The source is not mishandling a handshake; there is
+no handshake.
+
+It is a receiver-initialisation requirement. A D-PHY RX lane leaves its
+initialisation state only after it has observed the lane in **Stop state
+(LP-11)**. `HAL_DCMIPP_CSI_SetConfig()` clears `CSI_CR.CSIEN`, clears `CSI_PCR`,
+programs the frequency range into the Synopsys PHY over its test interface, and
+finally releases the digital reset with `CSI_PRCR.PEN`. Nothing in that sequence
+waits for the lanes to be idle, because nothing can: if the transmitter is
+mid-burst when the reset is released, the receiver sees high-speed levels and
+never gets its LP-11.
+
+The **data** lanes would recover on their own - they return to LP-11 after every
+line. The **clock** lane is the one that does not, if the transmitter runs a
+continuous high-speed clock, which is the common default. Then the clock lane
+never presents LP-11 again once streaming has started, and only removing power
+produces one. That matches what the board reports: `ACTCLF` appears only after a
+source restart.
+
+So the one lever that would remove the manual cycle is on the source: if the
+CrossLink's CSI-2 transmitter can be switched to **non-continuous clock mode**
+(clock lane drops to LP-11 during blanking), the receiver should re-lock at the
+next frame. From the STM32 side there is nothing to fix - the register map
+exposes only `CSI_PCR` (lane enables, power-down) and `CSI_PRCR.PEN` (reset),
+with no stop-state override.
+
+Note also, while reading that sequence: `HAL_DCMIPP_CSI_SetConfig()` writes both
+bytes of the DLL oscillation target to PHY register `0xe3`, where the comment
+directly above says `0xe3 & 0xe2`. Register `0xe2` is never written. This only
+matters above 1500 Mbit/s, where `osc_freq_target` stops being constant - which
+is the range this board runs in.
+
 ### Who restarts the source
 
 `source manual` (**the default**) prints a prompt and waits for the clock to
