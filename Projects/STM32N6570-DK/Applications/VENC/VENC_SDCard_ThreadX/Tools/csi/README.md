@@ -11,12 +11,14 @@ questions about a CSI-2 source that the STM32 does not control:
    caveat imposed by the silicon - see [Why the two channels
    alternate](#why-the-two-channels-alternate).
 
-Status, from two hardware sessions so far:
+Status, from three hardware sessions so far:
 
-- A link exists at **1250 Mbit/s per lane, 2 lanes, physical mapping** - clock,
-  lane sync and a first frame, in that order. It is **marginal**: uncorrectable
-  header ECC, payload CRC and D-PHY SOT errors all appear. `refine` is the
-  command for picking a better profile.
+- The link is **clean at 2500 Mbit/s per lane, 2 lanes, physical mapping**: no
+  ECC, CRC or D-PHY errors over 500 ms. 1250 Mbit/s locks as well but is
+  **marginal** - around 200 uncorrectable header ECC errors per 500 ms - and so
+  are 1200, 1450 and 1550. 2500 is therefore the known-good setting.
+- **VC0 carries 1920x1080 RAW10 (0x2b) at 48-50 fps.** VC1 has not been seen on
+  any setting yet, so the side-by-side goal is still short of a second source.
 - The failure that produced no clock at any of 72 settings was **start order**,
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
 - The source takes **6 to 8 s** to start transmitting after a restart. Every
@@ -65,18 +67,19 @@ Console is COM1 at 115200 8N1, same as the main application.
 
 ```
 BSP_CAMERA_Init()      power the camera connector, DCMIPP clocks, HAL_DCMIPP_Init
-csi_probe_run()        known-good setting -> sweep if needed -> characterise
-csi_probe_print_report()
-preview_best_effort()  two channels side by side, or one centred, or nothing
+print_help()           and then wait for a command
 ```
 
-`csi_probe_run()` first tries the setting the encoder application uses, 1250
-Mbit/s per lane over two lanes, and restarts the source against it. That is very
-often the answer, and it is worth trying first because a full sweep is expensive:
-every combination needs the source restarted, which costs its reset sequence plus
-its boot time. Only if that finds no link does it sweep all 21 bitrates x 2 lane
-counts x 2 mappings, which takes a couple of minutes and prints an estimate
-before it starts.
+**Nothing is measured until it is asked for.** Every measurement costs a manual
+source power-cycle, so a probe at boot spends one on a setting the operator may
+not want - and it did, on 1250 Mbit/s, for 90 s of waiting each reset. The D-PHY
+is left unprogrammed until the first command, which also means no report can
+show numbers that were never measured.
+
+`probe <mbps>` characterises one setting. `probe` without an argument tries the
+known-good setting first - 2500 Mbit/s per lane over two lanes - and only if
+that finds no link does it sweep all 21 bitrates x 2 lane counts x 2 mappings,
+which takes a couple of minutes and prints an estimate before it starts.
 
 Example of the report it prints:
 
@@ -111,8 +114,8 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 | `status` | decoded CSI status registers plus preview counters |
 | `report` | reprint the last probe result |
 
-`single` / `dual` take their geometry from the last probe result, so run `probe`
-(or let start-up do it) before using them.
+`single` / `dual` take their geometry from the last probe result, so `probe` has
+to have run before them.
 
 ---
 
@@ -436,15 +439,15 @@ now clears the flags and the HAL error code after stopping.
 
 ## 7. Not done
 
-- The characterisation and preview stages have not been seen against a healthy
-  link. Every number in the example report is illustrative.
-- The **preview has never started**. `single 0` fails in
-  `HAL_DCMIPP_CSI_PIPE_Start()` within a few milliseconds, so it is one of that
-  function's three entry guards rather than the virtual-channel timeout. The most
-  likely one is `CMCR.INSEL`: `HAL_DCMIPP_CSI_PIPE_SetConfig()` writes it only
-  when the handle is in INIT or READY, and otherwise does nothing while still
-  returning `HAL_OK`. The preview now prints which guard tripped; that is the
-  next thing to read.
+- The **preview has never started**. `single 0` failed in
+  `HAL_DCMIPP_CSI_PIPE_Start()` on the guard that requires the DCMIPP to be in
+  serial mode: `CMCR.INSEL` read back as parallel. That register is written by
+  `HAL_DCMIPP_CSI_PIPE_SetConfig()`, but only while the handle is in `INIT` or
+  `READY` - in any other state the function writes nothing at all, returns
+  `HAL_OK` and then sets the state to `READY`, which erases the evidence. The
+  preview now sets `CMCR.INSEL` and `P1FSCR` itself when the call left the
+  DCMIPP in parallel mode, and records the handle state either side of the call
+  so a repeat failure says which of the two it was. Not yet re-run on hardware.
 - The receiver's data type filter **does not distinguish `0x2b` from `0x2f`**.
   Both accept the same RAW10 stream and both come back with an identical count,
   so the walk cannot separate them and breaks the tie towards the type CSI-2

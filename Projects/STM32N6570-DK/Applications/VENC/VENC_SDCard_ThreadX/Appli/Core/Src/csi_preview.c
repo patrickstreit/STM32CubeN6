@@ -77,6 +77,14 @@ static HAL_StatusTypeDef preview_set_downsize(uint32_t src_w, uint32_t src_h)
   return HAL_DCMIPP_PIPE_EnableDownsize(&hcamera_dcmipp, DCMIPP_PIPE1);
 }
 
+/* What the DCMIPP looked like around the pipe configuration. Kept so that a
+   failed start can report what happened instead of what might have happened:
+   the state a HAL call decided on is overwritten by the call itself. */
+static uint8_t  cfg_state_before;
+static uint8_t  cfg_state_after;
+static uint32_t cfg_cmcr;
+static uint32_t cfg_p1fscr;
+
 /**
   * @brief  Configure PIPE1 to turn @p dt into RGB565 tiles.
   * @note   Only the demosaicing branch is enabled; the YUV conversion of the
@@ -92,9 +100,28 @@ static HAL_StatusTypeDef preview_configure_pipe1(const csi_preview_source_t *src
   csi_pipe.DataTypeMode = DCMIPP_DTMODE_DTIDA;
   csi_pipe.DataTypeIDA  = src->dt;
   csi_pipe.DataTypeIDB  = src->dt;
+  cfg_state_before      = (uint8_t)hcamera_dcmipp.State;
   if (HAL_DCMIPP_CSI_PIPE_SetConfig(&hcamera_dcmipp, DCMIPP_PIPE1, &csi_pipe) != HAL_OK)
   {
     return HAL_ERROR;
+  }
+  cfg_state_after = (uint8_t)hcamera_dcmipp.State;
+  cfg_cmcr        = hcamera_dcmipp.Instance->CMCR;
+  cfg_p1fscr      = hcamera_dcmipp.Instance->P1FSCR;
+
+  /* That call writes CMCR.INSEL only while the handle is in INIT or READY. In
+     any other state it does nothing at all, returns HAL_OK and then claims
+     READY - so the flow selection above may not have been written either.
+     Routing the pixel pipes to the serial interface is not optional here, so
+     do it directly when the call left the DCMIPP in parallel mode. */
+  if (READ_BIT(hcamera_dcmipp.Instance->CMCR, DCMIPP_CMCR_INSEL) != DCMIPP_SERIAL_MODE)
+  {
+    MODIFY_REG(hcamera_dcmipp.Instance->P1FSCR,
+               DCMIPP_P1FSCR_DTMODE | DCMIPP_P1FSCR_DTIDA | DCMIPP_P1FSCR_DTIDB,
+               DCMIPP_DTMODE_DTIDA | (src->dt << DCMIPP_P1FSCR_DTIDA_Pos) |
+               (src->dt << DCMIPP_P1FSCR_DTIDB_Pos));
+    CLEAR_BIT(hcamera_dcmipp.Instance->PRCR, DCMIPP_PRCR_ENABLE);
+    SET_BIT(hcamera_dcmipp.Instance->CMCR, DCMIPP_CMCR_INSEL);
   }
 
   /* The external source dictates the frame rate; take every frame. */
@@ -261,24 +288,28 @@ static void preview_report_start_failure(uint32_t vc, uint32_t addr)
 {
   uint32_t insel = READ_BIT(hcamera_dcmipp.Instance->CMCR, DCMIPP_CMCR_INSEL);
 
-  printf("PREVIEW: could not start PIPE1 on VC%lu' + N + '", (unsigned long)vc);
+  printf("PREVIEW: could not start PIPE1 on VC%lu\n", (unsigned long)vc);
+  printf("         DCMIPP state %u before the pipe configuration, %u after;\n"
+         "         CMCR 0x%08lx, P1FSCR 0x%08lx directly after it\n",
+         (unsigned)cfg_state_before, (unsigned)cfg_state_after,
+         (unsigned long)cfg_cmcr, (unsigned long)cfg_p1fscr);
 
   if ((addr & 0xFU) != 0U)
   {
-    printf("         destination 0x%08lx is not 16-byte aligned' + N + '", (unsigned long)addr);
+    printf("         destination 0x%08lx is not 16-byte aligned\n", (unsigned long)addr);
   }
   if (hcamera_dcmipp.PipeState[DCMIPP_PIPE1] != HAL_DCMIPP_PIPE_STATE_READY)
   {
-    printf("         PIPE1 state is %d, not READY' + N + '",
+    printf("         PIPE1 state is %d, not READY\n",
            (int)hcamera_dcmipp.PipeState[DCMIPP_PIPE1]);
   }
   if (insel != DCMIPP_SERIAL_MODE)
   {
-    /* HAL_DCMIPP_CSI_PIPE_SetConfig() only writes CMCR.INSEL when the handle is
-       in INIT or READY; in any other state it silently does nothing and still
-       returns HAL_OK, so the pipe configuration above can appear to succeed. */
-    printf("         DCMIPP is in parallel mode - CSI_PIPE_SetConfig did not take' + N + '"
-           "         effect, handle state is %d' + N + '", (int)hcamera_dcmipp.State);
+    /* The configuration above sets CMCR.INSEL directly when the HAL skipped it,
+       so reaching this point means the write itself did not stick - which is a
+       clock or reset problem in the DCMIPP, not a sequencing one. */
+    printf("         CMCR.INSEL reads back as parallel although it was written;\n"
+           "         the DCMIPP is not clocked or is held in reset\n");
   }
 }
 

@@ -63,8 +63,11 @@ static const uint16_t csi_scan_mbps[] =
 };
 #define CSI_SCAN_MBPS_COUNT (sizeof(csi_scan_mbps) / sizeof(csi_scan_mbps[0]))
 
-/* Known-good starting point: the setting the encoder application uses. */
-const csi_probe_phy_t csi_probe_default_phy = { .mbps = 1250U, .lanes = 2U, .swapped = 0U };
+/* Known-good starting point: the only setting this source has ever produced a
+   clean link on - 2500 Mbit/s over two lanes, physical mapping. 1250 was the
+   guess before there were measurements; it is marginal here, roughly 200
+   uncorrectable header ECC errors per 500 ms. */
+const csi_probe_phy_t csi_probe_default_phy = { .mbps = 2500U, .lanes = 2U, .swapped = 0U };
 
 /* Manual by default: the source may well be on a bench supply, with no line back
    to the board for BSP_CAMERA_HwReset() to pull. */

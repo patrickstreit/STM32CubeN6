@@ -7,9 +7,8 @@
   * receiver and nothing else - no encoder, no SD card, no FileX - so the CSI-2
   * link can be characterised and previewed on the display in isolation.
   *
-  * On start-up it sweeps the D-PHY settings, reports what it found and, when two
-  * virtual channels are present, shows both side by side. Everything is also
-  * reachable interactively over COM1; type "help".
+  * It measures nothing on its own: every measurement costs a source power cycle,
+  * so what runs is what was asked for over COM1. Type "help".
   ******************************************************************************
   */
 
@@ -127,39 +126,6 @@ static bool source_from_probe(uint32_t vc, csi_preview_source_t *src)
   src->width  = info->width;
   src->height = info->lines;
   return true;
-}
-
-/** @brief Show whatever the probe found: two channels side by side if possible. */
-static void preview_best_effort(void)
-{
-  csi_preview_source_t src[2];
-  uint32_t found = 0U;
-
-  for (uint32_t vc = 0U; (vc < CSI_PROBE_VC_COUNT) && (found < 2U); vc++)
-  {
-    const csi_probe_vc_info_t *info = &g_report.vc[vc];
-
-    if (g_report.valid && info->present && (info->width != 0U) && (info->lines != 0U))
-    {
-      if (source_from_probe(vc, &src[found]))
-      {
-        found++;
-      }
-    }
-  }
-
-  if (found >= 2U)
-  {
-    (void)csi_preview_dual(&src[0], &src[1]);
-  }
-  else if (found == 1U)
-  {
-    (void)csi_preview_single(&src[0]);
-  }
-  else
-  {
-    printf("CTRL: nothing to preview\n");
-  }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -384,18 +350,22 @@ void csi_probe_thread_func(ULONG arg)
   BSP_LED_On(LED1);
 
   printf("\nCSI-2 probe application\n");
-  printf("Trying the known-good setting, then sweeping if that finds nothing.\n");
-  printf("The source has to be power-cycled *after* the receiver is configured -\n");
-  printf("that is the order a D-PHY transmitter needs to be picked up. You will be\n");
-  printf("prompted for it; 'source auto' instead drives EN_CAM/NRST_CAM, which only\n");
+  printf("Nothing is measured until you ask for it: every measurement needs the\n");
+  printf("source power-cycled *after* the receiver is configured - that is the\n");
+  printf("order a D-PHY transmitter needs to be picked up - and doing that at\n");
+  printf("boot only burns a power cycle on a setting you may not want.\n");
+  printf("'probe <mbps>' characterises one setting, 'probe' alone tries the\n");
+  printf("known-good %u Mbit/s and then sweeps. You will be prompted for the\n",
+         (unsigned)csi_probe_default_phy.mbps);
+  printf("power cycle; 'source auto' instead drives EN_CAM/NRST_CAM, which only\n");
   printf("reaches a module powered from the camera connector.\n");
 
-  g_phy.mbps  = 0U;   /* 0 = known-good first, then sweep */
+  /* The receiver is left unprogrammed: 0 means 'no setting applied yet', so the
+     first command decides what the D-PHY gets, and no report can claim numbers
+     that were never measured. */
+  g_phy.mbps  = 0U;
   g_phy.lanes = 2U;
-  csi_probe_run(&g_phy, &g_report);
-  csi_probe_print_report(&g_report, &g_phy);
-
-  preview_best_effort();
+  csi_probe_report_invalidate(&g_report);
 
   BSP_LED_On(LED2);
   print_help();
