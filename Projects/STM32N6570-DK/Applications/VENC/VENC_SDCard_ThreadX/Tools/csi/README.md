@@ -268,6 +268,34 @@ Two things about that pipe are worth knowing, both learned the hard way:
   and it is also what separates "no packets" from "packets full of zeros", a
   distinction this source actually makes.
 
+### What the data type error means
+
+The preview sets `CSI_SR0.IDERRF` permanently - around 13000 polling samples per
+second - and `CSI_ERR1` names `0x2f`. It looks like a fault and is not one. Three
+measurements pin it down, and none of them needed guessing at the register map:
+
+| virtual channel filter | pipe | data type errors per second | frames |
+| --- | --- | --- | --- |
+| all types, format BPP8 | none | 0 | 49 |
+| all types, format BPP10 | none | 0 | 50 |
+| all types, format BPP10 | PIPE1 on `0x2b` | ~13100 | full rate |
+| one type (`0x2b`) | none | ~12000 | full rate |
+
+`VC0CFGR1` reads `0x00000301` in the second and third rows - identical. So it is
+neither the filter nor the word format: **the flag appears as soon as something
+consumes a subset of what arrives.** The channel carries `0x2b`, `0x12` and
+`0x2f`; PIPE1 is configured for `0x2b`; the other two reach the receiver and are
+claimed by nobody, and that is what "unfiltered data type" reports.
+
+Narrowing the channel filter to `0x2b` does not help - the fourth row is the
+rejection column of the data type walk, which runs exactly that configuration.
+The only quiet combination is accepting everything and consuming nothing.
+
+It costs no frames. The preview runs at the full source rate throughout: 761
+tiles in about 15 s. The frame count printed by `errors` does drop while a pipe
+runs, but that is this tool's own counter losing the flag to the HAL's frame
+interrupt handler, not a dropped frame - `errors` says so when it detects it.
+
 **Interrupts are masked during every measurement.** At a mismatched bitrate the
 receiver raises one error per packet; with the HAL handler attached that is an
 interrupt storm which starves the console before the probe can report anything.
@@ -530,10 +558,11 @@ now clears the flags and the HAL error code after stopping.
 - `dual` has **never run**: only one channel has ever been found, so the
   per-frame `P1FSCR.VC` switch described above is still an untested assumption.
   `single 0` works - 1920x1080 RAW10 downsized to 400x225 on the display.
-- The **preview reports two CSI errors when it starts** (`ErrorCode=0x100` sync,
-  then `0x900` sync plus data ID). They appear once at start-up and the picture
-  is fine afterwards, so they look like the transition rather than a fault, but
-  that has not been established.
+- The **two DCMIPP errors at preview start** (`0x100` sync, then `0x900` sync
+  plus data ID) are a real transient: the counters stay at two however long the
+  preview runs. What is *not* a transient is the CSI data type error flag - see
+  [What the data type error means](#what-the-data-type-error-means). It is
+  explained and harmless, but it is permanently set while anything captures.
 - What the `0x2f` RAW20 packets are **for** is unanswered. They are real - 264
   per frame, 168 bytes each, and the buffer comes back written rather than
   untouched - but almost entirely zero, and neither their count nor their length

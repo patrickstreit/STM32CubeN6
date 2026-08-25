@@ -1968,4 +1968,15 @@ void csi_probe_watch_errors(uint32_t window_ms)
          (unsigned long)wdg, (unsigned long)phy);
   printf("     counts are polling samples, not packets - only their presence and\n"
          "     their ratio to the frame count mean anything\n");
+
+  if ((CSI->IER0 & (DCMIPP_CSI_IT_EOF0 | DCMIPP_CSI_IT_SOF0)) != 0U)
+  {
+    /* A running pipe has the HAL's handler on the frame interrupts, and it
+       clears the same flags this loop polls. The frame count then reads far
+       below the real rate and looks exactly like dropped frames. It is not:
+       the preview's own tile counter is the number to trust while a pipe runs. */
+    printf("     a pipe is running, so its interrupt handler is clearing the frame\n"
+           "     flags too - the frame count above is not the frame rate. Use the\n"
+           "     preview tile counter in 'status' for that\n");
+  }
 }

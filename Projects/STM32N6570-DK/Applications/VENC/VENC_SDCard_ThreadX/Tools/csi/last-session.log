@@ -1,0 +1,79 @@
+﻿----- > probe 2500
+CSI: source transmitting 0 ms after its restart
+----- > status
+CSI: VC0 data type walk, 100 ms per candidate
+        DT   name          accepted  rejected
+       0x10  NULL          0         1211
+       0x11  BLANKING      0         1220
+       0x12  EMBEDDED      5         1232
+       0x13  ?             0         1243
+       0x18  YUV420_8      0         1252
+       0x19  YUV420_10     0         1264
+       0x1a  YUV420_8_LEG  0         1276
+       0x1c  YUV420_8_CS   0         1286
+       0x1d  YUV420_10_CS  0         1296
+       0x1e  YUV422_8      0         1308
+       0x1f  YUV422_10     0         1056
+       0x20  RGB444        0         1056
+       0x21  RGB555        0         1064
+       0x22  RGB565        0         1076
+       0x23  RGB666        0         1088
+       0x24  RGB888        0         1100
+       0x28  RAW6          0         1108
+       0x29  RAW7          0         1120
+       0x2a  RAW8          0         1131
+       0x2b  RAW10         5         1140
+       0x2c  RAW12         0         1152
+       0x2d  RAW14         0         1164
+       0x2e  RAW16         0         1173
+       0x2f  RAW20         5         1184
+       0x30  USER1         0         1194
+       0x31  USER2         0         1204
+       0x32  USER3         0         1214
+       0x33  USER4         0         1224
+       0x34  USER5         0         1236
+       0x35  USER6         0         1248
+       0x36  USER7         0         1260
+       0x37  USER8         0         1272
+CSI: VC0 3 candidates accepted data; picking 0x2b (RAW10), the one
+     that accepted the most, preferring a defined data type on a tie
+CSI: VC0 accepted more than one data type - what line does each one
+     describe? Same line means one stream the filter cannot split;
+     different lines mean different packets
+CSI:   0x12 bytes/line = 319   [1:y  160:y  319:y  320:n]
+       0x12 EMBEDDED     lines to 1, bytes to 319
+CSI:   0x2b bytes/line = 2399   [1:y  1200:y  2399:y  2400:n]
+       0x2b RAW10        lines to 1079, bytes to 2399
+CSI:   0x2f bytes/line = 167   [1:y  84:y  167:y  168:n]
+       0x2f RAW20        lines to 263, bytes to 167
+     every accepted type describes a different line, so the channel
+     carries that many kinds of packet. 'grab 0 <dt>' shows what is
+     in each of them
+CSI: VC0 geometry, counter 0 reading the channel as the identified format
+CSI:   lines      = 1079   [1:y  540:y  1079:y  1080:n]
+CSI:   bytes/line = 2399   [1:y  1200:y  2399:y  2400:n]
+
+=== CSI-2 probe result ===
+D-PHY : 2500 Mbit/s per lane, 2 lane(s), physical mapping
+Link  : clean over 500 ms, no ecc/crc/dphy errors
+VC0   : 48.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
+        2 other data type(s) also accepted: 0x12(EMBEDDED) 0x2f(RAW20)
+==========================
+
+----- > single 0
+CTRL: unknown command 'ssingle 0'
+PREVIEW: VC0 1920x1080 -> 400x225 at x=200
+----- > errors 1000
+CSI: 1000 ms after clearing the flags, VC0 frames 8
+     id 13108  ecc 0 (0 corrected)  crc 0  sync 0  spkt 0  wdg 0  phy 0
+     counts are polling samples, not packets - only their presence and
+     their ratio to the frame count mean anything
+----- > status
+CSI SR0=0x081e0000 SR1=0xe6180000 ERR1=0x002f0000 ERR2=0x00000000
+  dphy: clk-active
+  vc  : vc0-active vc1-active vc2-active vc3-active
+  filt: VC0CFGR1=0x00000301 all data types, common format 3
+  err : unfiltered-dt(vc0,dt0x2f)
+DCMIPP: 0 pipe error(s), 2 global error(s), last code 0x00000900
+PREVIEW: mode=single tiles=667/0 P1FSCR=0x8000002b P1CFSCR=0x0000002b
+
