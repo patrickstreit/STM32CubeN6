@@ -33,12 +33,31 @@
 .PARAMETER MaxSeconds
   Upper bound per command, in case the board never goes quiet.
 
+.PARAMETER OnPromptCommand
+  Command line to run when the board's output matches -OnPrompt. This is how the
+  manual power-cycle disappears: the probe asks for the source to be restarted,
+  and whatever can do that runs here. The script knows nothing about what that
+  is - a programmable supply, a relay, a switchable hub are all just a command.
+  Nothing is run if this is empty, which keeps the default behaviour unchanged.
+
+.PARAMETER OnPrompt
+  Regex that triggers -OnPromptCommand. Defaults to the probe's own request.
+
+.PARAMETER OnPromptCooldownMs
+  The probe reprints its prompt while it waits; one power cycle per second would
+  be worse than none. Further matches are ignored for this long after a trigger.
+
 .EXAMPLE
   ./Tools/debug/csi-console.ps1 -Commands 'probe 2500','vcs','grab 0 0x2f 64'
 
 .EXAMPLE
   ./Tools/debug/csi-console.ps1 -MaxSeconds 20
   Listen only - for catching a reset banner.
+
+.EXAMPLE
+  ./Tools/debug/csi-console.ps1 -OnPromptCommand 'dutpower cycle' `
+      -WaitFor "first frame after" -Sequence "link 280000"
+  Unattended: the source is restarted whenever the probe asks for it.
 #>
 [CmdletBinding()]
 param(
@@ -50,7 +69,10 @@ param(
   [int]      $CharDelayMs = 3,
   [int]      $MaxSeconds = 180,
   [string]   $WaitFor,
-  [string]   $Log
+  [string]   $Log,
+  [string]   $OnPrompt           = 'power-cycle the source now',
+  [string]   $OnPromptCommand,
+  [int]      $OnPromptCooldownMs = 5000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,6 +94,40 @@ catch { throw "cannot open $Port : $($_.Exception.Message). A terminal program i
 
 $transcript = New-Object System.Text.StringBuilder
 
+$script:lastTrigger = [datetime]::MinValue
+
+function Invoke-OnPrompt
+{
+  param([string]$Matched)
+
+  if (((Get-Date) - $script:lastTrigger).TotalMilliseconds -lt $OnPromptCooldownMs) { return }
+  $script:lastTrigger = Get-Date
+
+  Write-Host "`n----- ! $OnPromptCommand (matched '$Matched')"
+  [void]$transcript.AppendLine("----- ! $OnPromptCommand (matched '$Matched')")
+
+  # The serial port stays open across this. The probe counts seconds while it
+  # waits for a clock and prints a dot per second; closing the port would lose
+  # exactly the output the caller is waiting for.
+  try
+  {
+    $output = Invoke-Expression $OnPromptCommand | Out-String
+    if ($output) { Write-Host $output.TrimEnd() }
+    if (($LASTEXITCODE -ne $null) -and ($LASTEXITCODE -ne 0))
+    {
+      Write-Host "----- ! command exited $LASTEXITCODE"
+      [void]$transcript.AppendLine("----- ! command exited $LASTEXITCODE")
+    }
+  }
+  catch
+  {
+    # A source that cannot be restarted is worth reporting, but not worth
+    # abandoning the session over - the operator can still do it by hand.
+    Write-Host "----- ! command failed: $($_.Exception.Message)"
+    [void]$transcript.AppendLine("----- ! command failed: $($_.Exception.Message)")
+  }
+}
+
 function Read-Until-Idle
 {
   param([int]$IdleMs, [int]$MaxSeconds, [string]$WaitFor)
@@ -89,15 +145,26 @@ function Read-Until-Idle
       Write-Host -NoNewline $chunk
       $lastData = Get-Date
 
+      # Accumulated whether or not -WaitFor is set: the power-cycle trigger has
+      # to work in an idle-timeout run too. Bounded, because a long session
+      # would otherwise keep every byte the board ever said.
+      $seen += $chunk
+      if ($seen.Length -gt 8192) { $seen = $seen.Substring($seen.Length - 8192) }
+
+      if ($OnPromptCommand -and $OnPrompt -and ($seen -match $OnPrompt))
+      {
+        # Drop what has already been matched, or the same prompt fires again on
+        # the next chunk that arrives.
+        $matched = $Matches[0]
+        $seen    = $seen.Substring($seen.IndexOf($matched) + $matched.Length)
+        Invoke-OnPrompt -Matched $matched
+      }
+
       # Some commands say nothing at all while they work - 'link' prints its
       # prompt and then waits in silence for a source that may be minutes away.
       # Going quiet is not the same as being finished, so those need a pattern
       # to wait for rather than an idle timeout.
-      if ($WaitFor)
-      {
-        $seen += $chunk
-        if ($seen -match $WaitFor) { break }
-      }
+      if ($WaitFor -and ($seen -match $WaitFor)) { break }
     }
     else
     {

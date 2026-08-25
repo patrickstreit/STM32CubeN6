@@ -487,6 +487,58 @@ is a no-op when the requested setting is already programmed, and a restart is
 only requested if the D-PHY was actually reprogrammed or there is no clock. A
 full start-up run therefore asks for one power-cycle, not three.
 
+### Taking the human out of the loop
+
+The manual default is a prompt on the console, and a prompt is something a
+script can see. `csi-console.ps1` takes `-OnPromptCommand`: a command line to run
+whenever the board's output matches `-OnPrompt`, which defaults to the probe's
+own request. The console tool knows nothing about what restarts the source - a
+programmable supply, a relay and a switchable hub are all just a command line.
+
+On this bench that command is `dutpower cycle`, and `dutpower.toml` in the
+project root describes the setup: a PPK2 in source-meter mode holding 5 V, with
+the CrossLink board's 3V3 coming off that same switched rail through the
+Mini-360, so one switch takes both rails down.
+
+```powershell
+./Tools/debug/csi-console.ps1 -OnPromptCommand 'dutpower cycle' `
+    -WaitFor "first frame after" -Sequence "link 280000"
+```
+
+`dutpower` has to be on PATH for that to work - `pipx install "dutpower[ppk2]"`
+or `uv tool install`. Until it is, name the executable in its virtual
+environment instead; the argument is a command line, so anything that runs will
+do.
+
+**A `dutpower serve` has to be running in its own terminal.** The PPK2 ties its
+output to the connection that set it: close the serial port and the rail is
+gone. That was measured here, and it means a one-shot process cannot switch the
+source on and walk away - it would switch on and then, by exiting, switch
+straight off. `serve` holds the connection, every other command routes through
+it automatically, and `dutpower cycle` refuses with exit code 5 if it is not
+there. The rail lives exactly as long as that process, so stopping it takes the
+source down.
+
+Two things are worth knowing before trusting it:
+
+- **The serial port stays open across the cycle.** The probe counts seconds
+  while it waits for a clock, printing a dot per second; closing the port would
+  lose exactly the output the run is waiting for.
+- **Cutting a rail is only a power-cycle if nothing else feeds it.** The DK is
+  still running, and its MIPI and I2C lines can hold the source's 3V3 up through
+  the protection diodes of its I/O. `dutpower off` followed by `dutpower measure
+  --seconds 1` has to read approximately zero, or no amount of switching will
+  restart anything.
+
+Nothing about the firmware changed for this: the contract is the prompt the
+probe already printed, and `CSI_SOURCE_MANUAL` is still the default. The
+fallbacks that exist because power-cycles used to be expensive - `scan slow`
+degrading to one restart, `refine` taking a single sample per profile - are
+firmware policy that predates the host-side cycle and are unchanged.
+
+`source auto` remains the better answer for a module on the camera connector:
+EN_CAM / NRST_CAM need no instrument at all.
+
 `link` is the command to reach for first. It applies the current setting, gets
 the source restarted, and reports when each stage appeared:
 
@@ -620,7 +672,8 @@ now clears the flags and the HAL error code after stopping.
   between **channels**, which the hardware showed: the same column on VC1 was
   zero for all 28 candidates. Nothing was rejected there because nothing arrived.
 - `refine` takes one sample per profile. Ranking two neighbouring profiles needs
-  repeats, and each repeat costs a manual power-cycle.
+  repeats, and each repeat costs a power-cycle - now a command rather than a
+  handhold, but still a cost the ranking does not pay.
 - The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`
   latches SOT/control flags while it drives the D-PHY through reset, which showed
   up as `PHY` on a random-looking subset of bitrates. There is now a settle delay
@@ -647,13 +700,19 @@ now clears the flags and the HAL error code after stopping.
 Three commands from a cold start, in `Projects/STM32N6570-DK/Applications/VENC/VENC_SDCard_ThreadX`:
 
 ```powershell
+dutpower serve                       # in its own terminal, left running
+```
+
+```powershell
 ./Tools/debug/stm32n6-gdb.ps1 -Build -FlashAppli -Preset CsiProbe
-./Tools/debug/csi-console.ps1 -WaitFor "first frame after" -Sequence "link 280000"   # power-cycle the source
+./Tools/debug/csi-console.ps1 -OnPromptCommand 'dutpower cycle' -WaitFor "first frame after" -Sequence "link 280000"
 ./Tools/debug/csi-console.ps1 -Sequence "probe 2500; single 0"
 ```
 
-The second one is the only one that needs a human: the source has to be
-power-cycled while it waits. Everything after that runs on a live link with no
+The second one is the only one that needs the source restarted, and
+`-OnPromptCommand` is what does it - see [Taking the human out of the
+loop](#taking-the-human-out-of-the-loop). Drop that argument and the probe asks
+a human instead. Everything after that runs on a live link with no
 further cycles - `vcs`, `dt`, `geom`, `grab`, `bayer`, `errors` all work without
 touching the D-PHY.
 

@@ -1,0 +1,26 @@
+# This bench, for the dutpower tool (repo: dutpower, kept beside this one).
+# Nothing here is knowledge about the firmware; it describes what feeds the
+# CSI-2 source.
+#
+# The source is the CrossLink board, fed 5 V by a PPK2 in source-meter mode.
+# Its 3V3 rail comes off that same switched 5 V through the Mini-360 buck, so a
+# single switch takes both rails down. Combined draw is about 1.4 W, i.e. some
+# 280 mA at 5 V - well inside the PPK2's 1 A, though the second USB cable
+# ("USB POWER ONLY") is still worth attaching for the inrush.
+
+# The PPK2 drops its rail when the serial port closes, so a 'dutpower serve'
+# has to be running for 'on' and 'cycle' to mean anything. Everything routes
+# through it on the default address; no key is needed here for that.
+
+[supply]
+backend     = "ppk2"
+mode        = "source"
+voltage     = 5.0
+max_voltage = 5.0     # the CrossLink board has no headroom above this
+off_ms      = 750     # long enough for the bulk capacitors to drain
+
+# The probe applies its PHY settings first and only then asks for the source, so
+# what matters is that the FPGA comes up afterwards - however long its
+# configuration reload takes. Waiting for current beats guessing a delay.
+wait_for_current_ma = 50
+wait_timeout_ms     = 15000
