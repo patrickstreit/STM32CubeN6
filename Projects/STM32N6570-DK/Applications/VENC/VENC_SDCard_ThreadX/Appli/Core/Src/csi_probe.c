@@ -933,8 +933,10 @@ static const uint8_t csi_dt_candidates[] =
 
 /**
   * @brief  Offer the receiver exactly one data type and see whether data flows.
-  * @param  lb_hit  out: the line/byte counter reached line 1 byte 1, so a long
-  *                 packet of this data type was accepted into the datapath
+  * @param  lb_hit  out: how many times the line/byte counter reached line 1
+  *                 byte 1, i.e. how much data of this type was accepted. A
+  *                 count rather than a flag, because a single hit over several
+  *                 thousand packets is a corrupted header, not a second stream
   * @param  id_err  out: how often the ID error flag re-asserted after being
   *                 cleared - roughly, how many packets were rejected
   *
@@ -944,13 +946,13 @@ static const uint8_t csi_dt_candidates[] =
   * as a wrong answer.
   */
 static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
-                     bool *lb_hit, uint32_t *id_err)
+                     uint32_t *lb_hit, uint32_t *id_err)
 {
   DCMIPP_CSI_VCFilteringConfTypeDef     filter = {0};
   DCMIPP_CSI_LineByteCounterConfTypeDef cnt    = {0};
   uint32_t tickstart;
 
-  *lb_hit = false;
+  *lb_hit = 0U;
   *id_err = 0U;
 
   csi_stop_all_vc();
@@ -978,7 +980,7 @@ static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
 
     if ((sr0 & CSI_SR0_LB0F) != 0U)
     {
-      *lb_hit   = true;
+      (*lb_hit)++;
       CSI->FCR0 = CSI_SR0_LB0F;
     }
     if ((sr0 & CSI_SR0_IDERRF) != 0U)
@@ -1002,7 +1004,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
 {
   /* static: keeps ~150 bytes off a thread stack that is only 4 kB. */
   static uint32_t id_err[CSI_DT_CANDIDATE_COUNT];
-  static bool     lb_hit[CSI_DT_CANDIDATE_COUNT];
+  static uint32_t lb_hit[CSI_DT_CANDIDATE_COUNT];
   uint32_t accepted = 0U;
   uint32_t quietest = 0U;
   uint32_t best_idx = 0U;
@@ -1044,16 +1046,16 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
      previous method only ever saw a single value. */
   printf("CSI: VC%lu data type walk, %lu ms per candidate\n",
          (unsigned long)vc, (unsigned long)per_dt_ms);
-  printf("        DT   name          data  rejected\n");
+  printf("        DT   name          accepted  rejected\n");
   for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
   {
-    printf("       0x%02x  %-12s  %-4s  %lu\n",
+    printf("       0x%02x  %-12s  %-8lu  %lu\n",
            (unsigned)csi_dt_candidates[i],
            csi_probe_dt_name(csi_dt_candidates[i]),
-           lb_hit[i] ? "yes" : "-",
+           (unsigned long)lb_hit[i],
            (unsigned long)id_err[i]);
 
-    if (lb_hit[i])
+    if (lb_hit[i] != 0U)
     {
       uint32_t dt = csi_dt_candidates[i];
 
@@ -1066,7 +1068,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
       {
         info->dt_mask_hi |= (1UL << (dt - 32U));
       }
-      if (!found || (id_err[i] < id_err[best_idx]))
+      if (!found || (lb_hit[i] > lb_hit[best_idx]))
       {
         best_idx = i;
         found    = true;
@@ -1103,7 +1105,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
     info->image_dt   = csi_dt_candidates[best_idx];
     info->dt_corrupt = accepted - 1U;
     printf("CSI: VC%lu %lu candidates accepted data; picking 0x%02lx (%s), the one\n"
-           "     that rejected fewest packets\n",
+           "     that accepted the most\n",
            (unsigned long)vc, (unsigned long)accepted,
            (unsigned long)info->image_dt, csi_probe_dt_name(info->image_dt));
     if (accepted == CSI_DT_CANDIDATE_COUNT)
@@ -1163,10 +1165,15 @@ static bool probe_line(uint32_t vc, uint32_t value, uint32_t timeout_ms)
   return csi_reaches(vc, value, 1U, timeout_ms);
 }
 
+/* Which line probe_byte() interrogates. Line 1 is a poor default on a real
+   source: the first line of a frame is often embedded data or blanking, and
+   shorter than an image line, so measuring there reports a length no image line
+   actually has. */
+static uint32_t g_byte_probe_line = 1U;
+
 static bool probe_byte(uint32_t vc, uint32_t value, uint32_t timeout_ms)
 {
-  /* Line 1, so the byte counter refers to bytes inside a single line. */
-  return csi_reaches(vc, 1U, value, timeout_ms);
+  return csi_reaches(vc, g_byte_probe_line, value, timeout_ms);
 }
 
 /**
@@ -1252,6 +1259,8 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
   /* Several frame periods, so a miss is a real miss rather than a window that
      fell between two frames. */
   const uint32_t timeout_ms = 120U;
+  DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
+  uint32_t first_bytes;
   uint32_t bpp;
   bool     lines_ok;
   bool     bytes_ok;
@@ -1267,14 +1276,29 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
   csi_stop_all_vc();
-  (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, csi_probe_dt_bpp_code(info->image_dt));
+
+  /* Accept the image data type and nothing else. HAL_DCMIPP_CSI_SetVCConfig()
+     sets ALLDT instead, and then the line counter counts every long packet on
+     the channel - embedded data, blanking, anything the source interleaves -
+     rather than image lines only. */
+  filter.DataTypeNB        = 1U;
+  filter.DataTypeClass[0]  = info->image_dt;
+  filter.DataTypeFormat[0] = csi_probe_dt_bpp_code(info->image_dt);
+  (void)HAL_DCMIPP_CSI_SetVCFilteringConfig(&hcamera_dcmipp, vc, &filter);
 
   if (!csi_start_vc(vc, 150U))
   {
     printf("CSI: VC%lu did not report the active state; measuring anyway\n", (unsigned long)vc);
   }
 
-  info->lines          = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
+  info->lines = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
+
+  /* The first line, kept only for comparison. */
+  g_byte_probe_line = 1U;
+  first_bytes       = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
+
+  /* And the middle of the frame, which is where an image line is most likely. */
+  g_byte_probe_line    = (info->lines > 2U) ? (info->lines / 2U) : 1U;
   info->bytes_per_line = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
 
   printf("CSI: VC%lu geometry, counter 0 reading the channel as %s\n", (unsigned long)vc,
@@ -1283,7 +1307,17 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
   lines_ok = geom_verify(vc, info->lines, timeout_ms, probe_line, "lines     ");
   bytes_ok = geom_verify(vc, info->bytes_per_line, timeout_ms, probe_byte, "bytes/line");
 
+  if (first_bytes != info->bytes_per_line)
+  {
+    printf("CSI:   line 1 is %lu bytes, line %lu is %lu - the frame is not\n"
+           "         uniform, so some of those lines are not image lines\n",
+           (unsigned long)first_bytes, (unsigned long)g_byte_probe_line,
+           (unsigned long)info->bytes_per_line);
+  }
+
   csi_stop_all_vc();
+  /* Leave the channel accepting everything again. */
+  (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, csi_probe_dt_bpp_code(info->image_dt));
   HAL_NVIC_EnableIRQ(CSI_IRQn);
 
   /* A number that failed its own check is worse than no number: it looks like a
