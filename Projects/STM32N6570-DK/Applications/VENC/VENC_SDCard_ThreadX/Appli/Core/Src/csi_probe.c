@@ -1820,6 +1820,29 @@ void csi_probe_print_report(const csi_probe_report_t *report, const csi_probe_ph
   printf("==========================\n\n");
 }
 
+/** @brief Print which data types virtual channel 0 is currently letting through. */
+static void csi_print_vc0_filter(void)
+{
+  uint32_t cfg1 = CSI->VC0CFGR1;
+
+  printf("  filt: VC0CFGR1=0x%08lx ", (unsigned long)cfg1);
+
+  if ((cfg1 & CSI_VC0CFGR1_ALLDT) != 0U)
+  {
+    printf("all data types, common format %lu\n",
+           (unsigned long)((cfg1 & CSI_VC0CFGR1_CDTFT) >> CSI_VC0CFGR1_CDTFT_Pos));
+  }
+  else
+  {
+    /* Only slot 0 is decoded: the probe never fills more, and reading the rest
+       would need CFGR2..4 for a case that has not come up. */
+    printf("slot0 %s dt 0x%02lx format %lu\n",
+           ((cfg1 & CSI_VC0CFGR1_DT0EN) != 0U) ? "on" : "off",
+           (unsigned long)((cfg1 & CSI_VC0CFGR1_DT0) >> CSI_VC0CFGR1_DT0_Pos),
+           (unsigned long)((cfg1 & CSI_VC0CFGR1_DT0FT) >> CSI_VC0CFGR1_DT0FT_Pos));
+  }
+}
+
 void csi_probe_dump_status(void)
 {
   uint32_t sr0  = CSI->SR0;
@@ -1849,6 +1872,8 @@ void csi_probe_dump_status(void)
     if ((sr0 & (CSI_SR0_EOF0F << vc))     != 0U) { printf(" eof%lu", (unsigned long)vc); }
   }
   printf("\n");
+
+  csi_print_vc0_filter();
 
   printf("  err :");
   if ((sr0 & CSI_SR0_SYNCERRF) != 0U)
@@ -1890,4 +1915,57 @@ void csi_probe_dump_status(void)
   /* Flag-clear registers mirror the status bit positions. */
   CSI->FCR0 = sr0;
   CSI->FCR1 = sr1;
+}
+
+void csi_probe_watch_errors(uint32_t window_ms)
+{
+  uint32_t id_err   = 0U;
+  uint32_t ecc      = 0U;
+  uint32_t ecc_corr = 0U;
+  uint32_t crc      = 0U;
+  uint32_t sync     = 0U;
+  uint32_t spkt     = 0U;
+  uint32_t wdg      = 0U;
+  uint32_t phy      = 0U;
+  uint32_t eof      = 0U;
+  uint32_t tickstart;
+
+  if (window_ms == 0U) { window_ms = 500U; }
+
+  /* Clearing first is the whole point. CSI_ERR1 latches its data type field and
+     is never re-armed, so a status read minutes after a measurement still names
+     the data type that measurement rejected - which is how a stale value gets
+     read as a fresh symptom. Flags in SR0/SR1 do re-arm, so counting how often
+     they come back after a clear is a rate rather than a memory. */
+  CSI->FCR0 = 0xFFFFFFFFU;
+  CSI->FCR1 = 0xFFFFFFFFU;
+
+  tickstart = HAL_GetTick();
+  while ((HAL_GetTick() - tickstart) < window_ms)
+  {
+    uint32_t sr0 = CSI->SR0;
+    uint32_t sr1 = CSI->SR1;
+
+    if ((sr0 & CSI_SR0_IDERRF)   != 0U) { id_err++; }
+    if ((sr0 & CSI_SR0_ECCERRF)  != 0U) { ecc++; }
+    if ((sr0 & CSI_SR0_CECCERRF) != 0U) { ecc_corr++; }
+    if ((sr0 & CSI_SR0_CRCERRF)  != 0U) { crc++; }
+    if ((sr0 & CSI_SR0_SYNCERRF) != 0U) { sync++; }
+    if ((sr0 & CSI_SR0_SPKTERRF) != 0U) { spkt++; }
+    if ((sr0 & CSI_SR0_WDERRF)   != 0U) { wdg++; }
+    if ((sr1 & CSI_SR1_PHY_ERRORS) != 0U) { phy++; }
+    if ((sr0 & CSI_SR0_EOF0F)    != 0U) { eof++; }
+
+    CSI->FCR0 = sr0 & (CSI_SR0_LINK_ERRORS | CSI_SR0_IDERRF | CSI_SR0_CECCERRF | CSI_SR0_EOF0F);
+    CSI->FCR1 = sr1 & CSI_SR1_PHY_ERRORS;
+  }
+
+  printf("CSI: %lu ms after clearing the flags, VC0 frames %lu\n",
+         (unsigned long)window_ms, (unsigned long)eof);
+  printf("     id %lu  ecc %lu (%lu corrected)  crc %lu  sync %lu  spkt %lu  wdg %lu  phy %lu\n",
+         (unsigned long)id_err, (unsigned long)ecc, (unsigned long)ecc_corr,
+         (unsigned long)crc, (unsigned long)sync, (unsigned long)spkt,
+         (unsigned long)wdg, (unsigned long)phy);
+  printf("     counts are polling samples, not packets - only their presence and\n"
+         "     their ratio to the frame count mean anything\n");
 }

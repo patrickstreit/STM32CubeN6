@@ -56,16 +56,26 @@ void BSP_CAMERA_FrameEventCallback(uint32_t Instance)
   }
 }
 
+/* Counted, not printed. These run in the DCMIPP interrupt, and printf there
+   blocks it for milliseconds per line at 115200 baud - which is long enough to
+   lose frames and so to change the very thing an error report is meant to
+   measure. 'status' reads the counters out. */
+static volatile uint32_t g_pipe_errors;
+static volatile uint32_t g_global_errors;
+static volatile uint32_t g_last_error_code;
+
 void BSP_CAMERA_PipeErrorCallback(uint32_t Instance)
 {
-  printf("DCMIPP PIPE%lu error, ErrorCode=0x%08lx\n",
-         (unsigned long)Instance, (unsigned long)hcamera_dcmipp.ErrorCode);
+  (void)Instance;
+  g_pipe_errors++;
+  g_last_error_code = hcamera_dcmipp.ErrorCode;
 }
 
 void BSP_CAMERA_ErrorCallback(uint32_t Instance)
 {
   (void)Instance;
-  printf("DCMIPP global error, ErrorCode=0x%08lx\n", (unsigned long)hcamera_dcmipp.ErrorCode);
+  g_global_errors++;
+  g_last_error_code = hcamera_dcmipp.ErrorCode;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -160,7 +170,11 @@ static void print_help(void)
          "  single <vc>        preview one channel, centred\n"
          "  dual <vcL> <vcR>   preview two channels side by side\n"
          "  off                stop the preview\n"
-         "  status             CSI status registers and preview counters\n"
+         "  errors [ms]        clear every CSI flag, then count what comes back,\n"
+         "                     next to the frame count over the same window\n"
+         "  status             CSI status registers, error counters and preview\n"
+         "                     counters. The flags are sticky - use 'errors' for\n"
+         "                     what is happening now\n"
          "  report             reprint the last probe result\n");
 }
 
@@ -331,7 +345,14 @@ static void handle_command(char *line)
   else if (strcmp(line, "status") == 0)
   {
     csi_probe_dump_status();
+    printf("DCMIPP: %lu pipe error(s), %lu global error(s), last code 0x%08lx\n",
+           (unsigned long)g_pipe_errors, (unsigned long)g_global_errors,
+           (unsigned long)g_last_error_code);
     csi_preview_print_stats();
+  }
+  else if (strncmp(line, "errors", 6) == 0)
+  {
+    csi_probe_watch_errors(arg_u32(line, 0U, 500U));
   }
   else if (strcmp(line, "report") == 0)
   {

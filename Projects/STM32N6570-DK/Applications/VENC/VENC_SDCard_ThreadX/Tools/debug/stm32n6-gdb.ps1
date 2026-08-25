@@ -166,6 +166,12 @@ $serverArgs = @(
   '-el', $Stldr
 )
 
+# Without this the server resets the target when GDB connects - which is fine
+# when the FSBL is about to be loaded anyway, and destructive when it is not:
+# attaching to a running board to read a register killed the CSI link and left
+# the core in the boot ROM at 0x18003a1a. -g attaches to what is running.
+if ($NoFsblLoad) { $serverArgs += '-g' }
+
 $gdbCommands = @("target extended-remote localhost:$Port")
 
 # The FSBL is a RAM image - its sections sit at 0x341xxxxx, not in flash - and in

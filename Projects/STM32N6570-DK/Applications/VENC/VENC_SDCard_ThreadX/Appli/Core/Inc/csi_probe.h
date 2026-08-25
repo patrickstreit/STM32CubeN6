@@ -243,6 +243,18 @@ void csi_probe_print_report(const csi_probe_report_t *report, const csi_probe_ph
 /** @brief Print CSI_SR0/CSI_SR1/CSI_ERR1/CSI_ERR2 decoded, without changing anything. */
 void csi_probe_dump_status(void);
 
+/**
+  * @brief  Clear every CSI status flag, then count what comes back over @p window_ms.
+  * @param  window_ms  observation window, 0 for 500 ms
+  *
+  * The difference from csi_probe_dump_status() is the clear. Status flags are
+  * sticky and CSI_ERR1 never re-arms at all, so a plain read reports the union
+  * of everything that ever happened - including whatever a measurement half an
+  * hour ago provoked. This reports what is happening now, next to the frame
+  * count over the same window, so an error rate can be put against a frame rate.
+  */
+void csi_probe_watch_errors(uint32_t window_ms);
+
 /** @brief Name of a CSI-2 data type, or "?" when unknown. */
 const char *csi_probe_dt_name(uint32_t dt);
 

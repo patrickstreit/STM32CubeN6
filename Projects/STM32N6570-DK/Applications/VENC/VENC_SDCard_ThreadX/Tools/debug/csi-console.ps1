@@ -122,6 +122,7 @@ try
     {
       Write-Host "`n----- > $command"
       [void]$transcript.AppendLine("----- > $command")
+      $before = $transcript.Length
 
       # One character at a time, with a gap. The probe's console reads a single
       # byte per HAL_UART_Receive() call with no FIFO and no interrupt, so a
@@ -135,6 +136,21 @@ try
       }
       $serial.Write("`r")
       Read-Until-Idle -IdleMs $IdleMs -MaxSeconds $MaxSeconds -WaitFor $WaitFor
+
+      # The board loses the occasional character - it polls one byte at a time
+      # with no FIFO - and a command that arrives as 'esingle 0' is simply gone.
+      # It says so itself, which makes the retry cheap and unambiguous.
+      if ($transcript.ToString().Substring($before) -match 'unknown command')
+      {
+        Write-Host "`n----- > $command (retry: a character was lost)"
+        foreach ($ch in $command.ToCharArray())
+        {
+          $serial.Write([string]$ch)
+          Start-Sleep -Milliseconds $CharDelayMs
+        }
+        $serial.Write("`r")
+        Read-Until-Idle -IdleMs $IdleMs -MaxSeconds $MaxSeconds -WaitFor $WaitFor
+      }
     }
   }
 }
