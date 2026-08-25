@@ -160,6 +160,15 @@ N, a binary search over 0..65535 finds the exact line count in 16 steps, and the
 same over the byte counter with the line fixed to 1 gives the payload bytes per
 line. Width follows from bytes per line and the bits per pixel of the data type.
 
+Two details the hardware settled. The counters match on an **index**, so the last
+line of a 1080-line frame is 1079 and the last byte of a 2400-byte line is 2399;
+the searches return indices and one is added afterwards, after the check below,
+so the check compares like for like. And the channel is filtered to the image
+data type for the duration - `HAL_DCMIPP_CSI_SetVCConfig()` sets `ALLDT`, and
+then the line counter counts every long packet including embedded data and
+blanking. With `ALLDT` a 1920x1080 source measured 1345 lines of 320 bytes;
+filtered, 1080 lines of 2400.
+
 That monotonicity is an assumption, so it is **checked rather than trusted**.
 After each search the probe re-probes four points - 1, half, the result, and one
 past it - and prints them. A search converging on something that is not a
@@ -429,18 +438,24 @@ now clears the flags and the HAL error code after stopping.
 
 - The characterisation and preview stages have not been seen against a healthy
   link. Every number in the example report is illustrative.
-- **The geometry measurement is still unvalidated.** Across clean links at 1550,
-  2000 and 2500 Mbit/s it returned 1345 lines and 319 bytes per line, where a
-  1920x1080 RAW10 frame should give 1080 and 2400. The reproducibility rules out
-  noise: 1345/319 is a real boundary of *something*. It was measured with a data
-  type that has since turned out to be bogus, so the first thing to do is repeat
-  it now that the type is identified properly - and read the monotonicity line
-  that the search now prints, which says whether the number means anything at
-  all.
-- The data type walk assumes the line/byte counter only counts packets the filter
-  accepted. If it turns out not to be gated that way, every candidate will show
-  `data yes` and the walk will say so; the rejection-count column is then the
-  only usable signal, and it has never been validated against a known source.
+- The **preview has never started**. `single 0` fails in
+  `HAL_DCMIPP_CSI_PIPE_Start()` within a few milliseconds, so it is one of that
+  function's three entry guards rather than the virtual-channel timeout. The most
+  likely one is `CMCR.INSEL`: `HAL_DCMIPP_CSI_PIPE_SetConfig()` writes it only
+  when the handle is in INIT or READY, and otherwise does nothing while still
+  returning `HAL_OK`. The preview now prints which guard tripped; that is the
+  next thing to read.
+- The receiver's data type filter **does not distinguish `0x2b` from `0x2f`**.
+  Both accept the same RAW10 stream and both come back with an identical count,
+  so the walk cannot separate them and breaks the tie towards the type CSI-2
+  defines. The two differ in one bit. Whether the comparison masks that bit, or
+  something else is going on, has not been established - only that the ambiguity
+  is systematic rather than a corrupted header, which is what an equal count over
+  many frames rules out.
+- The rejection-count column of the walk is **not a discriminator**. It reads
+  roughly 1050-1300 for every candidate including the correct one: it measures
+  how fast the loop polls, not how many packets were refused. It is printed
+  because that is visible in the table, not because it decides anything.
 - `refine` takes one sample per profile. Ranking two neighbouring profiles needs
   repeats, and each repeat costs a manual power-cycle.
 - The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`
