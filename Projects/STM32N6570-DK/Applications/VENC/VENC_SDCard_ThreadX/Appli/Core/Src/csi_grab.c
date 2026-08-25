@@ -162,6 +162,14 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
      other measurement in the probe does. */
   HAL_NVIC_DisableIRQ(CSI_IRQn);
 
+  /* Whatever left the pipe busy - a preview, a grab that could not be stopped -
+     is not this call's business, but a busy pipe cannot be configured. */
+  if (hcamera_dcmipp.PipeState[DCMIPP_PIPE0] == HAL_DCMIPP_PIPE_STATE_BUSY)
+  {
+    SET_BIT(CSI->CR, CSI_CR_VC0STOP << (4U * vc));
+    hcamera_dcmipp.PipeState[DCMIPP_PIPE0] = HAL_DCMIPP_PIPE_STATE_READY;
+  }
+
   memset(grab_buf, GRAB_FILL, sizeof(grab_buf));
   SCB_CleanDCache_by_Addr((void *)grab_buf, (int32_t)sizeof(grab_buf));
 
@@ -204,7 +212,19 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
 
   counter = READ_REG(hcamera_dcmipp.Instance->P0DCCNTR) & DCMIPP_P0DCCNTR_CNT;
 
-  (void)HAL_DCMIPP_CSI_PIPE_Stop(&hcamera_dcmipp, DCMIPP_PIPE0, vc);
+  if (HAL_DCMIPP_CSI_PIPE_Stop(&hcamera_dcmipp, DCMIPP_PIPE0, vc) != HAL_OK)
+  {
+    /* That call waits for the virtual channel to leave its active state and
+       gives up when it never does - which is what happens when nothing is
+       arriving at all. It then leaves PipeState at BUSY, and from there every
+       HAL_DCMIPP_PIPE_SetConfig() on this pipe returns HAL_ERROR: one grab
+       against a dead link made every later grab impossible. Put the channel and
+       the state back by hand.
+
+       The stop bits sit four apart: VC0START is bit 2, VC0STOP bit 3. */
+    SET_BIT(CSI->CR, CSI_CR_VC0STOP << (4U * vc));
+    hcamera_dcmipp.PipeState[DCMIPP_PIPE0] = HAL_DCMIPP_PIPE_STATE_READY;
+  }
   (void)HAL_DCMIPP_PIPE_DisableCrop(&hcamera_dcmipp, DCMIPP_PIPE0);
   CLEAR_BIT(hcamera_dcmipp.Instance->P0DCLMTR, DCMIPP_P0DCLMTR_ENABLE);
   HAL_NVIC_EnableIRQ(CSI_IRQn);
@@ -224,13 +244,33 @@ void csi_grab(uint32_t vc, uint32_t dt, uint32_t show_bytes)
            (unsigned long)GRAB_BUF_SIZE);
   }
 
-  if (counter == 0U)
+  if (show_bytes > counter) { show_bytes = counter; }
+
+  /* The counter alone cannot say whether anything was written: it holds the
+     previous capture's value when a frame does not complete, so a data type
+     that delivers nothing still reports the byte count of the one before it.
+     The fill pattern is the honest test - and it is also what separates "no
+     packets" from "packets full of zeros", which is a distinction this source
+     actually makes. */
   {
-    printf("      nothing arrived under this data type. The pipe's own filter\n"
-           "      rejected every packet, so no packet on the wire carries it\n");
-    return;
+    uint32_t looked_at = (counter < 4096U) ? counter : 4096U;
+    uint32_t untouched = 0U;
+
+    if (looked_at == 0U) { looked_at = 64U; }
+    for (uint32_t i = 0U; i < looked_at; i++)
+    {
+      if (grab_buf[i] == GRAB_FILL) { untouched++; }
+    }
+
+    if (untouched == looked_at)
+    {
+      printf("      nothing arrived: the buffer still holds its fill pattern over\n"
+             "      the first %lu bytes. No packet on the wire carries this data\n"
+             "      type - the count above is left over from the capture before\n",
+             (unsigned long)looked_at);
+      return;
+    }
   }
 
-  if (show_bytes > counter) { show_bytes = counter; }
   grab_hexdump(grab_buf, show_bytes);
 }

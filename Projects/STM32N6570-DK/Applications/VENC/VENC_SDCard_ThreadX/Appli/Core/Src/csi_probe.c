@@ -944,6 +944,10 @@ bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window
    packets:" line that was permanently empty. */
 static const uint8_t csi_dt_candidates[] =
 {
+  /* Long packets that are not pictures. Leaving these out is what hid the
+     source's embedded data line: the walk reported two accepted types on a
+     channel that actually carries three, because 0x12 was never offered. */
+  0x10U, 0x11U, 0x12U, 0x13U,                               /* null .. embedded */
   0x18U, 0x19U, 0x1AU, 0x1CU, 0x1DU, 0x1EU, 0x1FU,          /* YUV           */
   0x20U, 0x21U, 0x22U, 0x23U, 0x24U,                        /* RGB           */
   0x28U, 0x29U, 0x2AU, 0x2BU, 0x2CU, 0x2DU, 0x2EU, 0x2FU,   /* RAW6 .. RAW20 */
@@ -1032,7 +1036,7 @@ static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
 }
 
 /* Lives further down, with the counter searches it needs. */
-static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t window_ms);
+static void dt_describe_accepted(uint32_t vc, const uint32_t *lb_hit, uint32_t window_ms);
 
 void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *info)
 {
@@ -1157,26 +1161,12 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
       printf("     every candidate accepted, so the counter is not filtered by\n"
              "     data type and this column proves nothing\n");
     }
-    else if (accepted == 2U)
-    {
-      /* Two acceptances are worth one more measurement: they are either two
-         streams the receiver keeps apart or one stream its filter cannot. */
-      uint32_t other_idx = best_idx;
-
-      for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
-      {
-        if ((lb_hit[i] != 0U) && (i != best_idx))
-        {
-          other_idx = i;
-        }
-      }
-      dt_disambiguate(vc, csi_dt_candidates[best_idx], csi_dt_candidates[other_idx],
-                      per_dt_ms);
-    }
     else
     {
-      /* Nothing further: with three or more the pairwise test below would need
-         a decision about which pair to run, and that decision has no basis. */
+      /* More than one acceptance is worth one more measurement: either the
+         channel carries several kinds of packet, or the filter cannot tell two
+         data types apart. The line each one describes decides it. */
+      dt_describe_accepted(vc, lb_hit, per_dt_ms);
     }
   }
 }
@@ -1423,94 +1413,75 @@ static bool dt_measure_shape(uint32_t vc, uint32_t dt, uint32_t timeout_ms,
 }
 
 /**
-  * @brief  Two accepted data types: two streams, or one the filter cannot split?
+  * @brief  Measure the line each accepted data type describes, and say what that
+  *         means about how many streams the channel carries.
   *
-  * Enabling both at once decides it. Two streams add up - twice the data type,
-  * twice the packets, twice the counter hits. One stream matched by two filter
-  * values does not: the same packets are counted once either way. The shape of
-  * a line is the second, independent signal, and it comes from a different
-  * mechanism than the hit count: two genuinely different formats of the same
-  * picture cannot have the same number of bytes per line.
+  * The obvious test - enable two data types at once and see whether the counts
+  * add up - was tried and does not work. The line/byte counter fires once per
+  * frame at line 1 byte 1, and packets of different data types share one frame
+  * on this source, so the count is the frame rate whether one type is enabled or
+  * two. It said "5 hits" in every combination.
+  *
+  * The shape does discriminate, and it needs no assumption about framing: two
+  * data types that select the same packets must report the same bytes per line.
+  * On the hardware they did not - 0x2b came back with 2400 bytes per line and
+  * 0x2f with 168 - which is only possible if the filter really is selecting
+  * different packets.
   */
-static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t window_ms)
+static void dt_describe_accepted(uint32_t vc, const uint32_t *lb_hit, uint32_t window_ms)
 {
-  uint8_t  both[2] = { (uint8_t)dt_a, (uint8_t)dt_b };
-  uint32_t hit_a;
-  uint32_t hit_b;
-  uint32_t hit_both;
-  uint32_t err;
-  uint32_t lines_a;
-  uint32_t lines_b;
-  uint32_t bytes_a;
-  uint32_t bytes_b;
-  uint32_t apart;
-  uint32_t together;
-  bool     shape_a;
-  bool     shape_b;
+  uint32_t shown = 0U;
+  uint32_t first_bytes = 0U;
+  bool     any_equal   = false;
+
+  printf("CSI: VC%lu accepted more than one data type - what line does each one\n"
+         "     describe? Same line means one stream the filter cannot split;\n"
+         "     different lines mean different packets\n", (unsigned long)vc);
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
 
-  dt_trial(vc, dt_a, window_ms, &hit_a, &err);
-  dt_trial(vc, dt_b, window_ms, &hit_b, &err);
-  dt_trial_n(vc, both, 2U, window_ms, &hit_both, &err);
+  for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
+  {
+    uint32_t lines;
+    uint32_t bytes;
+    bool     ok;
 
-  printf("CSI: VC%lu 0x%02lx and 0x%02lx both accepted - one stream or two?\n",
-         (unsigned long)vc, (unsigned long)dt_a, (unsigned long)dt_b);
+    if (lb_hit[i] == 0U) { continue; }
 
-  shape_a = dt_measure_shape(vc, dt_a, window_ms, &lines_a, &bytes_a);
-  shape_b = dt_measure_shape(vc, dt_b, window_ms, &lines_b, &bytes_b);
+    /* Four is already more than this source has; the cap is there so a receiver
+       that accepts everything cannot turn this into a minute of searching. */
+    if (shown >= 4U)
+    {
+      printf("     (further accepted types not measured)\n");
+      break;
+    }
+
+    ok = dt_measure_shape(vc, csi_dt_candidates[i], window_ms, &lines, &bytes);
+    printf("       0x%02x %-12s lines to %lu, bytes to %lu%s\n",
+           (unsigned)csi_dt_candidates[i], csi_probe_dt_name(csi_dt_candidates[i]),
+           (unsigned long)lines, (unsigned long)bytes,
+           ok ? "" : "  (not a measurement)");
+
+    if (shown == 0U)      { first_bytes = bytes; }
+    else if (bytes == first_bytes) { any_equal = true; }
+    else                  { /* different, which is the informative case */ }
+    shown++;
+  }
 
   /* Back to accepting everything, as the walk leaves it. */
   (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
   HAL_NVIC_EnableIRQ(CSI_IRQn);
 
-  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu%s\n",
-         (unsigned long)dt_a, (unsigned long)hit_a,
-         (unsigned long)lines_a, (unsigned long)bytes_a,
-         shape_a ? "" : " (not a measurement)");
-  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu%s\n",
-         (unsigned long)dt_b, (unsigned long)hit_b,
-         (unsigned long)lines_b, (unsigned long)bytes_b,
-         shape_b ? "" : " (not a measurement)");
-  printf("       both together  %lu hits\n", (unsigned long)hit_both);
-
-  apart    = hit_a + hit_b;
-  together = hit_both;
-
-  if ((hit_a == 0U) || (hit_b == 0U))
+  if (any_equal)
   {
-    printf("     one of them stopped delivering; the source changed under the\n"
-           "     measurement, so this comparison says nothing\n");
-  }
-  else if ((together * 4U) >= (apart * 3U))
-  {
-    printf("     two streams: accepting both roughly doubled the data, so the\n"
-           "     receiver is telling two data types apart\n");
-  }
-  else if (shape_a && shape_b && (lines_a == lines_b) && (bytes_a == bytes_b))
-  {
-    printf("     one stream: accepting both added nothing and both describe the\n"
-           "     same line, so the filter cannot tell 0x%02lx from 0x%02lx. The\n"
-           "     two differ in mask 0x%02lx, which the comparison ignores; only\n"
-           "     one of them is really on the wire\n",
-           (unsigned long)dt_a, (unsigned long)dt_b, (unsigned long)(dt_a ^ dt_b));
-  }
-  else if (shape_a != shape_b)
-  {
-    uint32_t solid  = shape_a ? dt_a : dt_b;
-    uint32_t hollow = shape_a ? dt_b : dt_a;
-
-    printf("     one picture: only 0x%02lx has a consistent line, and enabling\n"
-           "     both added no data. Under 0x%02lx the counter fires but no line\n"
-           "     ever completes, so whatever it lets through is not a second\n"
-           "     picture. 'grab %lu 0x%02lx' dumps those bytes\n",
-           (unsigned long)solid, (unsigned long)hollow,
-           (unsigned long)vc, (unsigned long)hollow);
+    printf("     two of them describe the same line, so the filter is not\n"
+           "     separating them - only one of that pair is on the wire\n");
   }
   else
   {
-    printf("     undecided: no extra data from enabling both, but the two do not\n"
-           "     describe the same line either\n");
+    printf("     every accepted type describes a different line, so the channel\n"
+           "     carries that many kinds of packet. 'grab %lu <dt>' shows what is\n"
+           "     in each of them\n", (unsigned long)vc);
   }
 }
 

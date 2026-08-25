@@ -25,6 +25,11 @@
   How long the board has to stay quiet before the next command is sent. Default
   8000, which clears the gap between the data type walk and the geometry search.
 
+.PARAMETER WaitFor
+  Regex that ends a command's read as soon as the output matches it, instead of
+  waiting for the board to fall quiet. Needed for commands that work in silence -
+  'link' prints its prompt and then says nothing until the source appears.
+
 .PARAMETER MaxSeconds
   Upper bound per command, in case the board never goes quiet.
 
@@ -44,6 +49,7 @@ param(
   [int]      $IdleMs     = 8000,
   [int]      $CharDelayMs = 3,
   [int]      $MaxSeconds = 180,
+  [string]   $WaitFor,
   [string]   $Log
 )
 
@@ -68,10 +74,11 @@ $transcript = New-Object System.Text.StringBuilder
 
 function Read-Until-Idle
 {
-  param([int]$IdleMs, [int]$MaxSeconds)
+  param([int]$IdleMs, [int]$MaxSeconds, [string]$WaitFor)
 
   $lastData = Get-Date
   $deadline = (Get-Date).AddSeconds($MaxSeconds)
+  $seen     = ''
 
   while ((Get-Date) -lt $deadline)
   {
@@ -81,10 +88,20 @@ function Read-Until-Idle
       [void]$transcript.Append($chunk)
       Write-Host -NoNewline $chunk
       $lastData = Get-Date
+
+      # Some commands say nothing at all while they work - 'link' prints its
+      # prompt and then waits in silence for a source that may be minutes away.
+      # Going quiet is not the same as being finished, so those need a pattern
+      # to wait for rather than an idle timeout.
+      if ($WaitFor)
+      {
+        $seen += $chunk
+        if ($seen -match $WaitFor) { break }
+      }
     }
     else
     {
-      if (((Get-Date) - $lastData).TotalMilliseconds -gt $IdleMs) { break }
+      if ((-not $WaitFor) -and (((Get-Date) - $lastData).TotalMilliseconds -gt $IdleMs)) { break }
       Start-Sleep -Milliseconds 50
     }
   }
@@ -117,7 +134,7 @@ try
         Start-Sleep -Milliseconds $CharDelayMs
       }
       $serial.Write("`r")
-      Read-Until-Idle -IdleMs $IdleMs -MaxSeconds $MaxSeconds
+      Read-Until-Idle -IdleMs $IdleMs -MaxSeconds $MaxSeconds -WaitFor $WaitFor
     }
   }
 }

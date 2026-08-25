@@ -19,8 +19,13 @@ Status, from three hardware sessions so far:
   are 1200, 1450 and 1550. 2500 is therefore the known-good setting.
 - **VC0 carries 1920x1080 RAW10 (0x2b) at 48-50 fps.** Confirmed twice over: by
   the line and byte counters, and by dumping the payload - `grab` returned
-  16-bit little-endian values in the 0..1023 range, 4147200 bytes for a frame,
-  which is 1920 x 1080 pixels unpacked to 16-bit words.
+  16-bit little-endian values in the 0..1023 range, 3840 bytes per line, which is
+  1920 pixels unpacked to 16-bit words.
+- **The channel carries two more kinds of packet besides the picture**: two lines
+  of embedded data (`0x12`, 320 bytes each, the 0x55/0x5a/0xa5 encoding sensors
+  use for register dumps) and 264 lines tagged `0x2f` RAW20 of 168 bytes that are
+  almost entirely zero. Neither is a second picture. What the source means by the
+  RAW20 lines is a question for the transmitter.
 - **VC1, VC2 and VC3 carry nothing.** `vcs` sees no frame start and no long
   packet on them, and a full data type walk on VC1 rejects nothing either -
   there are no packets to reject. The side-by-side goal is short of a second
@@ -29,8 +34,7 @@ Status, from three hardware sessions so far:
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
 - The source takes **6 to 8 s** to start transmitting after a restart. Every
   wait for it is a timeout that ends on the clock, never a fixed delay.
-- The characterisation and preview stages have not yet been exercised against a
-  healthy link.
+- `single 0` shows the picture on the display, downsized to 400x225.
 
 Everything below that is a measurement rather than a datasheet fact is marked as
 such.
@@ -130,6 +134,7 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 | `vcs [ms]` | ask each of VC0..VC3 in turn whether anything arrives on it, with the data type filter wide open. Finds channels that send no frame delimiters, which a probe run cannot. Needs a link but no power-cycle |
 | `dt [vc]` | walk every candidate data type on one channel and print the full table; VC 0 by default. Takes a few seconds, needs no power-cycle |
 | `geom [vc]` | measure lines and bytes per line of one channel, and print the monotonicity check; VC 0 by default |
+| `grab <vc> <dt> [n]` | dump the raw payload of one data type through the DCMIPP dump pipe and hexdump the first n bytes. Answers what a data type carries, not just how much of it there is |
 | `single <vc>` | preview one channel, centred |
 | `dual <vcL> <vcR>` | preview two channels side by side |
 | `off` | stop the preview |
@@ -185,20 +190,28 @@ underneath. If *every* candidate accepts, the counter is not gated by the data
 type filter and the column proves nothing - the table says so rather than
 returning a confident wrong answer.
 
-**When two data types accept, one more measurement decides between them.** The
-hardware produced exactly that: `0x2b` (RAW10) and `0x2f` (RAW20) both let the
-same stream through. Two accepted values mean either two streams the receiver
-keeps apart, or one stream its filter cannot. Enabling **both at once** tells
-them apart: two streams add up, one stream counted twice does not. The shape of
-a line is the second, independent signal - two different formats of the same
-picture cannot have the same number of bytes per line. The probe runs both and
-prints the verdict along with the numbers behind it.
+**When more than one data type accepts, the line each one describes decides what
+that means.** This channel accepts three: `0x2b` (RAW10), `0x12` (embedded data)
+and `0x2f` (RAW20). Several acceptances mean either several kinds of packet, or
+one kind the filter cannot tell apart from another - and two data types that
+select the same packets must report the same bytes per line. These do not:
 
-For `0x2b` / `0x2f` there is also a decisive argument from the register map:
-the receiver's word-format field stops at `DCMIPP_CSI_DT_BPP16`. It has no
-20-bit setting at all, so RAW20 is a value this DCMIPP can name but not receive.
-The tie-break in the walk prefers the type the receiver has a word format for,
-for exactly that reason.
+| data type | lines per frame | bytes per line |
+| --- | --- | --- |
+| `0x2b` RAW10 | 1080 | 2400 |
+| `0x2f` RAW20 | 264 | 168 |
+| `0x12` embedded | 2 | 320 |
+
+The obvious test - enable two data types at once and see whether the counts add
+up - was tried first and **does not work**. The line/byte counter fires once per
+frame at line 1 byte 1, and packets of different data types share one frame here,
+so the count is the frame rate whether one type is enabled or two. It read "5
+hits" in every combination. That test is gone; the shape is what discriminates,
+and it needs no assumption about framing.
+
+The candidate list covers `0x10` to `0x13` as well as the image types. Leaving
+those out is what hid the embedded data: the walk reported two accepted types on
+a channel that carries three, because `0x12` was never offered to it.
 
 This replaced a method that read the data type straight out of `CSI_ERR1` after
 narrowing the filter to a reserved type, so that every packet would name itself
@@ -231,6 +244,29 @@ geometry (a rate, a wrap-around, a threshold never reached) still returns a
 number that looks exactly like a measurement; the four points make it fail
 visibly. A result that fails its check is discarded rather than reported, because
 a plausible-looking wrong resolution is worse than none.
+
+**Payload** - the counters say how much arrives and in what shape; they cannot say
+what is in it. `grab` can. PIPE0 of the DCMIPP is the dump pipe - no ISP, no pixel
+packer, the received bytes in order - so pointing it at one data type and reading
+the first bytes back is the direct answer. It also brings a **second, independent
+data type filter**: the CSI virtual channel filter and the pipe's own `DTIDA`
+comparison are separate hardware, so a pair the first cannot separate may still be
+separated by the second.
+
+Two things about that pipe are worth knowing, both learned the hard way:
+
+- **The dump limit register is an event, not a wall.** `P0DCLMTR` set to 64 kB did
+  not stop the transfer: the pipe reported 4147200 bytes dumped - a full frame -
+  and wrote all of it, through the buffer and into the trace ring behind it. The
+  HAL name says so once you know what to look for: `HAL_DCMIPP_PIPE_EnableLimitEvent()`
+  enables an interrupt. What does bound the capture is the pipe's **crop**, set to
+  four lines; the buffer is sized for a whole 1080p frame so that a source getting
+  past the crop still cannot reach anything else.
+- **The byte counter is not cleared when a frame does not complete.** A data type
+  that delivers nothing reports the previous capture's count. The honest test is
+  the buffer's fill pattern, which is what `grab` checks before printing a dump -
+  and it is also what separates "no packets" from "packets full of zeros", a
+  distinction this source actually makes.
 
 **Interrupts are masked during every measurement.** At a mismatched bitrate the
 receiver raises one error per packet; with the HAL handler attached that is an
@@ -494,11 +530,15 @@ now clears the flags and the HAL error code after stopping.
 - `dual` has **never run**: only one channel has ever been found, so the
   per-frame `P1FSCR.VC` switch described above is still an untested assumption.
   `single 0` works - 1920x1080 RAW10 downsized to 400x225 on the display.
-- The receiver's data type filter **does not distinguish `0x2b` from `0x2f`**.
-  The walk now runs the joint test described in section 4 whenever exactly two
-  candidates accept, which decides between "two streams" and "one stream, two
-  matching filter values" from measurements rather than from the register map.
-  That test has not been run on hardware yet.
+- The **preview reports two CSI errors when it starts** (`ErrorCode=0x100` sync,
+  then `0x900` sync plus data ID). They appear once at start-up and the picture
+  is fine afterwards, so they look like the transition rather than a fault, but
+  that has not been established.
+- What the `0x2f` RAW20 packets are **for** is unanswered. They are real - 264
+  per frame, 168 bytes each, and the buffer comes back written rather than
+  untouched - but almost entirely zero, and neither their count nor their length
+  matches the picture. This side can only say what arrives; why the source sends
+  it is a question for the transmitter.
 - The rejection-count column of the walk does not discriminate **between
   candidates**: it reads roughly 1050-1300 for every one of them including the
   correct one, because it measures how fast the loop polls. It does discriminate
