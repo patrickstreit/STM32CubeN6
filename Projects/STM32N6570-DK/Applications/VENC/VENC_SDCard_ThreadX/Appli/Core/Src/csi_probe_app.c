@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "csi_grab.h"
 #include "csi_preview.h"
 #include "csi_probe.h"
 #include "main.h"
@@ -154,6 +155,8 @@ static void print_help(void)
          "                     arrives on it, delimited or not (default 200 ms)\n"
          "  dt <vc>            identify the data types on one virtual channel\n"
          "  geom <vc>          measure lines and bytes per line of one channel\n"
+         "  grab <vc> <dt> [n] dump the raw payload of one data type through the\n"
+         "                     DCMIPP dump pipe and print the first n bytes\n"
          "  single <vc>        preview one channel, centred\n"
          "  dual <vcL> <vcR>   preview two channels side by side\n"
          "  off                stop the preview\n"
@@ -266,6 +269,13 @@ static void handle_command(char *line)
     {
       printf("CTRL: applying the D-PHY setting failed\n");
     }
+  }
+  else if (strncmp(line, "grab", 4) == 0)
+  {
+    /* PIPE0 and PIPE1 would be reading the same channel; stop the preview so the
+       dump is the only consumer. */
+    csi_preview_stop();
+    csi_grab(arg_u32(line, 0U, 0U), arg_u32(line, 1U, 0x2BU), arg_u32(line, 2U, 64U));
   }
   else if (strncmp(line, "vcs", 3) == 0)
   {

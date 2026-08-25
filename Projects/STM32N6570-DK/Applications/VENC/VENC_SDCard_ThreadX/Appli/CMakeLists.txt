@@ -100,6 +100,7 @@ set(APP_Probe_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_threadx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_preview.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_grab.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/csi_probe_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/instrumentation.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32n6xx_hal_timebase_tim.c

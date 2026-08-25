@@ -30,6 +30,16 @@
   GDB commands to run once the target sits at the entry point. Quoted strings, one
   per array element.
 
+.PARAMETER EntryPoint
+  Symbol to stop at after a reset. BOOT_Application by default, which is where the
+  LRUN scheme hands over from the FSBL.
+
+.PARAMETER NoEntryBreak
+  Attach without resetting and without breaking anywhere - the right choice for a
+  flash-and-go run, and the only safe one when the board may already be past the
+  entry point: a batch run waiting for a symbol that will not come again has
+  nobody to interrupt it.
+
 .PARAMETER Interactive
   Leave GDB attached on the console instead of detaching and exiting. Without it
   the script detaches, which resumes the target: a board left halted by a script
@@ -62,6 +72,8 @@ param(
   [string]   $FsblPreset  = 'Debug',
   [int]      $Port        = 61234,
   [string[]] $Ex          = @(),
+  [string]   $EntryPoint  = 'BOOT_Application',
+  [switch]   $NoEntryBreak,
   [switch]   $Build,
   [switch]   $FlashAppli,
   [switch]   $NoFsblLoad,
@@ -155,10 +167,30 @@ $serverArgs = @(
 )
 
 $gdbCommands = @("target extended-remote localhost:$Port")
-if (-not $NoFsblLoad) { $gdbCommands += 'load' }
+
+# The FSBL is a RAM image - its sections sit at 0x341xxxxx, not in flash - and in
+# the board's development boot mode the ROM bootloader hands over to nothing on
+# its own. GDB's 'load' is therefore not a convenience here: it is what starts
+# the system at all. Reset instead of loading only makes sense when the FSBL is
+# expected to come up by itself.
+if (-not $NoFsblLoad)
+{
+  $gdbCommands += 'monitor halt'
+  $gdbCommands += 'load'
+}
+elseif (-not $NoEntryBreak)
+{
+  # Without the reset the breakpoint would wait for a symbol the running target
+  # already passed, and a batch run has nobody to interrupt it.
+  $gdbCommands += 'monitor reset'
+}
+
 $gdbCommands += "add-symbol-file $(ConvertTo-GdbPath $AppliElf)"
-$gdbCommands += 'tbreak BOOT_Application'
-$gdbCommands += 'continue'
+if ($EntryPoint -and (-not $NoEntryBreak))
+{
+  $gdbCommands += "tbreak $EntryPoint"
+  $gdbCommands += 'continue'
+}
 $gdbCommands += $Ex
 # 'detach' rather than 'continue': GDB's detach hands the target back running, and
 # it is the only way to end a batch run without leaving the core halted.
@@ -207,7 +239,12 @@ if ($FlashAppli)
 }
 
 Write-Host "==> starting ST-LINK_gdbserver on port $Port"
-$server  = Start-Process $GdbServer -ArgumentList $serverArgs -PassThru -WindowStyle Hidden
+# Start-Process does not quote the elements of -ArgumentList: an argument with a
+# space in it arrives as two. Both paths here live under "Program Files".
+$serverArgLine = ($serverArgs | ForEach-Object {
+  if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+}) -join ' '
+$server  = Start-Process $GdbServer -ArgumentList $serverArgLine -PassThru -WindowStyle Hidden
 $gdbExit = 1
 
 try

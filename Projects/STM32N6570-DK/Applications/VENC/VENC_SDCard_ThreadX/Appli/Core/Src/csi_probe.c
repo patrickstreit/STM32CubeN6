@@ -1375,15 +1375,26 @@ static uint32_t csi_search_max(uint32_t vc, uint32_t hi, uint32_t timeout_ms,
   return best;
 }
 
+/* Defined below, with the rest of the geometry checks. */
+static bool geom_verify(uint32_t vc, uint32_t best, uint32_t timeout_ms,
+                        bool (*reached)(uint32_t vc, uint32_t value, uint32_t timeout_ms),
+                        const char *what);
+
 /**
   * @brief  Filter @p vc down to @p dt and measure the shape of what arrives.
   * @param  lines  out: largest line index the counter still reaches
   * @param  bytes  out: largest byte index it reaches, on a line in mid-frame
+  * @retval true if the byte search passed its monotonicity check
   *
   * Indices, not counts - this is for comparing two data types against each
   * other, and the +1 that turns an index into a count would cancel anyway.
+  *
+  * The check is the point. A binary search returns a number whether or not the
+  * thing it searched is monotonic, and a data type that lets through scattered
+  * packets rather than whole lines produces a number that looks exactly like a
+  * measurement. Comparing two of those would be comparing two artefacts.
   */
-static void dt_measure_shape(uint32_t vc, uint32_t dt, uint32_t timeout_ms,
+static bool dt_measure_shape(uint32_t vc, uint32_t dt, uint32_t timeout_ms,
                              uint32_t *lines, uint32_t *bytes)
 {
   DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
@@ -1400,7 +1411,15 @@ static void dt_measure_shape(uint32_t vc, uint32_t dt, uint32_t timeout_ms,
   g_byte_probe_line = (*lines > 2U) ? (*lines / 2U) : 1U;
   *bytes            = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
 
-  csi_stop_all_vc();
+  {
+    char what[24];
+
+    (void)snprintf(what, sizeof(what), "0x%02x bytes/line", (unsigned)dt);
+    bool ok = geom_verify(vc, *bytes, timeout_ms, probe_byte, what);
+
+    csi_stop_all_vc();
+    return ok;
+  }
 }
 
 /**
@@ -1426,6 +1445,8 @@ static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t 
   uint32_t bytes_b;
   uint32_t apart;
   uint32_t together;
+  bool     shape_a;
+  bool     shape_b;
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
 
@@ -1433,21 +1454,24 @@ static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t 
   dt_trial(vc, dt_b, window_ms, &hit_b, &err);
   dt_trial_n(vc, both, 2U, window_ms, &hit_both, &err);
 
-  dt_measure_shape(vc, dt_a, window_ms, &lines_a, &bytes_a);
-  dt_measure_shape(vc, dt_b, window_ms, &lines_b, &bytes_b);
+  printf("CSI: VC%lu 0x%02lx and 0x%02lx both accepted - one stream or two?\n",
+         (unsigned long)vc, (unsigned long)dt_a, (unsigned long)dt_b);
+
+  shape_a = dt_measure_shape(vc, dt_a, window_ms, &lines_a, &bytes_a);
+  shape_b = dt_measure_shape(vc, dt_b, window_ms, &lines_b, &bytes_b);
 
   /* Back to accepting everything, as the walk leaves it. */
   (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
   HAL_NVIC_EnableIRQ(CSI_IRQn);
 
-  printf("CSI: VC%lu 0x%02lx and 0x%02lx both accepted - one stream or two?\n",
-         (unsigned long)vc, (unsigned long)dt_a, (unsigned long)dt_b);
-  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu\n",
+  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu%s\n",
          (unsigned long)dt_a, (unsigned long)hit_a,
-         (unsigned long)lines_a, (unsigned long)bytes_a);
-  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu\n",
+         (unsigned long)lines_a, (unsigned long)bytes_a,
+         shape_a ? "" : " (not a measurement)");
+  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu%s\n",
          (unsigned long)dt_b, (unsigned long)hit_b,
-         (unsigned long)lines_b, (unsigned long)bytes_b);
+         (unsigned long)lines_b, (unsigned long)bytes_b,
+         shape_b ? "" : " (not a measurement)");
   printf("       both together  %lu hits\n", (unsigned long)hit_both);
 
   apart    = hit_a + hit_b;
@@ -1463,13 +1487,25 @@ static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t 
     printf("     two streams: accepting both roughly doubled the data, so the\n"
            "     receiver is telling two data types apart\n");
   }
-  else if ((lines_a == lines_b) && (bytes_a == bytes_b))
+  else if (shape_a && shape_b && (lines_a == lines_b) && (bytes_a == bytes_b))
   {
     printf("     one stream: accepting both added nothing and both describe the\n"
            "     same line, so the filter cannot tell 0x%02lx from 0x%02lx. The\n"
            "     two differ in mask 0x%02lx, which the comparison ignores; only\n"
            "     one of them is really on the wire\n",
            (unsigned long)dt_a, (unsigned long)dt_b, (unsigned long)(dt_a ^ dt_b));
+  }
+  else if (shape_a != shape_b)
+  {
+    uint32_t solid  = shape_a ? dt_a : dt_b;
+    uint32_t hollow = shape_a ? dt_b : dt_a;
+
+    printf("     one picture: only 0x%02lx has a consistent line, and enabling\n"
+           "     both added no data. Under 0x%02lx the counter fires but no line\n"
+           "     ever completes, so whatever it lets through is not a second\n"
+           "     picture. 'grab %lu 0x%02lx' dumps those bytes\n",
+           (unsigned long)solid, (unsigned long)hollow,
+           (unsigned long)vc, (unsigned long)hollow);
   }
   else
   {
