@@ -120,10 +120,27 @@ const char *csi_probe_dt_name(uint32_t dt)
     case DCMIPP_DT_RGB565:    return "RGB565";
     case DCMIPP_DT_RGB666:    return "RGB666";
     case DCMIPP_DT_RGB888:    return "RGB888";
+    case 0x1AU: return "YUV420_8_LEG";
+    case 0x1CU: return "YUV420_8_CS";
+    case 0x1DU: return "YUV420_10_CS";
+    case 0x28U: return "RAW6";
+    case 0x29U: return "RAW7";
     case DCMIPP_DT_RAW8:      return "RAW8";
     case DCMIPP_DT_RAW10:     return "RAW10";
     case DCMIPP_DT_RAW12:     return "RAW12";
     case DCMIPP_DT_RAW14:     return "RAW14";
+    /* CSI-2 v2.0 added these two. The DCMIPP has word formats up to 16 bit
+       (DCMIPP_CSI_DT_BPP16), so RAW20 can be named here but not received. */
+    case 0x2EU: return "RAW16";
+    case 0x2FU: return "RAW20";
+    case 0x30U: return "USER1";
+    case 0x31U: return "USER2";
+    case 0x32U: return "USER3";
+    case 0x33U: return "USER4";
+    case 0x34U: return "USER5";
+    case 0x35U: return "USER6";
+    case 0x36U: return "USER7";
+    case 0x37U: return "USER8";
     default:                  return "?";
   }
 }
@@ -948,8 +965,8 @@ static const uint8_t csi_dt_candidates[] =
   * out to be useless that shows up as a column of identical values rather than
   * as a wrong answer.
   */
-static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
-                     uint32_t *lb_hit, uint32_t *id_err)
+static void dt_trial_n(uint32_t vc, const uint8_t *dts, uint32_t count, uint32_t window_ms,
+                       uint32_t *lb_hit, uint32_t *id_err)
 {
   DCMIPP_CSI_VCFilteringConfTypeDef     filter = {0};
   DCMIPP_CSI_LineByteCounterConfTypeDef cnt    = {0};
@@ -960,10 +977,13 @@ static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
 
   csi_stop_all_vc();
 
-  /* Accept this data type and nothing else. */
-  filter.DataTypeNB        = 1U;
-  filter.DataTypeClass[0]  = dt;
-  filter.DataTypeFormat[0] = csi_probe_dt_bpp_code(dt);
+  /* Accept these data types and nothing else. */
+  filter.DataTypeNB = count;
+  for (uint32_t i = 0U; i < count; i++)
+  {
+    filter.DataTypeClass[i]  = dts[i];
+    filter.DataTypeFormat[i] = csi_probe_dt_bpp_code(dts[i]);
+  }
   (void)HAL_DCMIPP_CSI_SetVCFilteringConfig(&hcamera_dcmipp, vc, &filter);
 
   cnt.VirtualChannel = vc;
@@ -1002,6 +1022,17 @@ static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
   CLEAR_BIT(CSI->PRGITR, CSI_PRGITR_LB0EN);
   csi_stop_all_vc();
 }
+
+static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
+                     uint32_t *lb_hit, uint32_t *id_err)
+{
+  uint8_t one = (uint8_t)dt;
+
+  dt_trial_n(vc, &one, 1U, window_ms, lb_hit, id_err);
+}
+
+/* Lives further down, with the counter searches it needs. */
+static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t window_ms);
 
 void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *info)
 {
@@ -1071,10 +1102,11 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
       {
         info->dt_mask_hi |= (1UL << (dt - 32U));
       }
-      /* Most data wins; on a tie prefer a data type CSI-2 actually defines.
-         The receiver's filter turned out not to distinguish 0x2b from 0x2f -
+      /* Most data wins; on a tie prefer a data type this receiver has a word
+         format for. The filter turned out not to distinguish 0x2b from 0x2f -
          they differ in one bit, both accept the same RAW10 stream, and both
-         come back with an identical count - but only 0x2b is a real data type.
+         come back with an identical count - but 0x2f is RAW20, and the DCMIPP
+         stops at 16-bit words, so it cannot be what is being received.
          Without this the choice between them was decided by which frame
          boundary the window happened to straddle, and picking 0x2f left the
          geometry running at 8 bpp on a 10 bpp stream. */
@@ -1125,6 +1157,129 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
       printf("     every candidate accepted, so the counter is not filtered by\n"
              "     data type and this column proves nothing\n");
     }
+    else if (accepted == 2U)
+    {
+      /* Two acceptances are worth one more measurement: they are either two
+         streams the receiver keeps apart or one stream its filter cannot. */
+      uint32_t other_idx = best_idx;
+
+      for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
+      {
+        if ((lb_hit[i] != 0U) && (i != best_idx))
+        {
+          other_idx = i;
+        }
+      }
+      dt_disambiguate(vc, csi_dt_candidates[best_idx], csi_dt_candidates[other_idx],
+                      per_dt_ms);
+    }
+    else
+    {
+      /* Nothing further: with three or more the pairwise test below would need
+         a decision about which pair to run, and that decision has no basis. */
+    }
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Channel survey                                                            */
+/* ------------------------------------------------------------------------- */
+
+void csi_probe_vc_survey(uint32_t window_ms)
+{
+  uint32_t hits[CSI_PROBE_VC_COUNT]   = {0};
+  uint32_t sticky[CSI_PROBE_VC_COUNT] = {0};
+  uint32_t carrying = 0U;
+
+  if (window_ms < 100U)
+  {
+    window_ms = 100U;
+  }
+
+  HAL_NVIC_DisableIRQ(CSI_IRQn);
+
+  for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+  {
+    DCMIPP_CSI_LineByteCounterConfTypeDef cnt = {0};
+    uint32_t tickstart;
+
+    csi_stop_all_vc();
+
+    /* Every data type: a channel carrying something this probe has no name for
+       still has to show up here. That is the whole point of asking one channel
+       at a time instead of trusting the frame-start flags of a shared window. */
+    (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
+
+    cnt.VirtualChannel = vc;
+    cnt.LineCounter    = 1U;
+    cnt.ByteCounter    = 1U;
+    (void)HAL_DCMIPP_CSI_SetLineByteCounterConfig(&hcamera_dcmipp, DCMIPP_CSI_COUNTER0, &cnt);
+
+    /* The channel only reaches its active state on a frame start, so a channel
+       without frame delimiters never gets there. Observe it regardless: the
+       counter is armed either way, and long packets without delimiters are
+       exactly one of the cases this survey exists to find. */
+    (void)csi_start_vc(vc, window_ms);
+
+    SET_BIT(CSI->PRGITR, CSI_PRGITR_LB0EN);
+    CSI->FCR0 = 0xFFFFFFFFU;
+
+    tickstart = HAL_GetTick();
+    while ((HAL_GetTick() - tickstart) < window_ms)
+    {
+      uint32_t sr0 = CSI->SR0;
+
+      sticky[vc] |= sr0;
+      if ((sr0 & CSI_SR0_LB0F) != 0U)
+      {
+        hits[vc]++;
+        CSI->FCR0 = CSI_SR0_LB0F;
+      }
+    }
+
+    CLEAR_BIT(CSI->PRGITR, CSI_PRGITR_LB0EN);
+  }
+
+  csi_stop_all_vc();
+  HAL_NVIC_EnableIRQ(CSI_IRQn);
+
+  printf("CSI: virtual channel survey, %lu ms each, every data type accepted\n",
+         (unsigned long)window_ms);
+  printf("        VC  active  frame starts  frame ends  data\n");
+  for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+  {
+    printf("        %lu   %-6s  %-12s  %-10s  %lu\n",
+           (unsigned long)vc,
+           ((sticky[vc] & (CSI_SR0_VC0STATEF << vc)) != 0U) ? "yes" : "no",
+           ((sticky[vc] & (CSI_SR0_SOF0F << vc))     != 0U) ? "yes" : "no",
+           ((sticky[vc] & (CSI_SR0_EOF0F << vc))     != 0U) ? "yes" : "no",
+           (unsigned long)hits[vc]);
+
+    if ((hits[vc] != 0U) || ((sticky[vc] & (CSI_SR0_SOF0F << vc)) != 0U))
+    {
+      carrying++;
+    }
+  }
+
+  for (uint32_t vc = 0U; vc < CSI_PROBE_VC_COUNT; vc++)
+  {
+    if ((hits[vc] != 0U) && ((sticky[vc] & (CSI_SR0_SOF0F << vc)) == 0U))
+    {
+      printf("     VC%lu has long packets but no frame start; it carries data\n"
+             "     without frame delimiters. 'dt %lu' will name the type\n",
+             (unsigned long)vc, (unsigned long)vc);
+    }
+  }
+
+  if (carrying <= 1U)
+  {
+    /* Worth saying explicitly, because "we only found one" invites the question
+       of whether the receiver could even have found a second one. */
+    printf("     one channel only. This receiver has start/stop, status and\n"
+           "     filtering for VC0..VC3 and nothing for the extended channels\n"
+           "     CSI-2 v2.0 added, so a source transmitting on VC4..VC15 is\n"
+           "     silence here rather than an error - if a second channel is\n"
+           "     expected, that is worth checking at the transmitter\n");
   }
 }
 
@@ -1218,6 +1373,109 @@ static uint32_t csi_search_max(uint32_t vc, uint32_t hi, uint32_t timeout_ms,
     }
   }
   return best;
+}
+
+/**
+  * @brief  Filter @p vc down to @p dt and measure the shape of what arrives.
+  * @param  lines  out: largest line index the counter still reaches
+  * @param  bytes  out: largest byte index it reaches, on a line in mid-frame
+  *
+  * Indices, not counts - this is for comparing two data types against each
+  * other, and the +1 that turns an index into a count would cancel anyway.
+  */
+static void dt_measure_shape(uint32_t vc, uint32_t dt, uint32_t timeout_ms,
+                             uint32_t *lines, uint32_t *bytes)
+{
+  DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
+
+  csi_stop_all_vc();
+
+  filter.DataTypeNB        = 1U;
+  filter.DataTypeClass[0]  = dt;
+  filter.DataTypeFormat[0] = csi_probe_dt_bpp_code(dt);
+  (void)HAL_DCMIPP_CSI_SetVCFilteringConfig(&hcamera_dcmipp, vc, &filter);
+  (void)csi_start_vc(vc, timeout_ms);
+
+  *lines            = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
+  g_byte_probe_line = (*lines > 2U) ? (*lines / 2U) : 1U;
+  *bytes            = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
+
+  csi_stop_all_vc();
+}
+
+/**
+  * @brief  Two accepted data types: two streams, or one the filter cannot split?
+  *
+  * Enabling both at once decides it. Two streams add up - twice the data type,
+  * twice the packets, twice the counter hits. One stream matched by two filter
+  * values does not: the same packets are counted once either way. The shape of
+  * a line is the second, independent signal, and it comes from a different
+  * mechanism than the hit count: two genuinely different formats of the same
+  * picture cannot have the same number of bytes per line.
+  */
+static void dt_disambiguate(uint32_t vc, uint32_t dt_a, uint32_t dt_b, uint32_t window_ms)
+{
+  uint8_t  both[2] = { (uint8_t)dt_a, (uint8_t)dt_b };
+  uint32_t hit_a;
+  uint32_t hit_b;
+  uint32_t hit_both;
+  uint32_t err;
+  uint32_t lines_a;
+  uint32_t lines_b;
+  uint32_t bytes_a;
+  uint32_t bytes_b;
+  uint32_t apart;
+  uint32_t together;
+
+  HAL_NVIC_DisableIRQ(CSI_IRQn);
+
+  dt_trial(vc, dt_a, window_ms, &hit_a, &err);
+  dt_trial(vc, dt_b, window_ms, &hit_b, &err);
+  dt_trial_n(vc, both, 2U, window_ms, &hit_both, &err);
+
+  dt_measure_shape(vc, dt_a, window_ms, &lines_a, &bytes_a);
+  dt_measure_shape(vc, dt_b, window_ms, &lines_b, &bytes_b);
+
+  /* Back to accepting everything, as the walk leaves it. */
+  (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
+  HAL_NVIC_EnableIRQ(CSI_IRQn);
+
+  printf("CSI: VC%lu 0x%02lx and 0x%02lx both accepted - one stream or two?\n",
+         (unsigned long)vc, (unsigned long)dt_a, (unsigned long)dt_b);
+  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu\n",
+         (unsigned long)dt_a, (unsigned long)hit_a,
+         (unsigned long)lines_a, (unsigned long)bytes_a);
+  printf("       0x%02lx alone     %lu hits, lines to %lu, bytes to %lu\n",
+         (unsigned long)dt_b, (unsigned long)hit_b,
+         (unsigned long)lines_b, (unsigned long)bytes_b);
+  printf("       both together  %lu hits\n", (unsigned long)hit_both);
+
+  apart    = hit_a + hit_b;
+  together = hit_both;
+
+  if ((hit_a == 0U) || (hit_b == 0U))
+  {
+    printf("     one of them stopped delivering; the source changed under the\n"
+           "     measurement, so this comparison says nothing\n");
+  }
+  else if ((together * 4U) >= (apart * 3U))
+  {
+    printf("     two streams: accepting both roughly doubled the data, so the\n"
+           "     receiver is telling two data types apart\n");
+  }
+  else if ((lines_a == lines_b) && (bytes_a == bytes_b))
+  {
+    printf("     one stream: accepting both added nothing and both describe the\n"
+           "     same line, so the filter cannot tell 0x%02lx from 0x%02lx. The\n"
+           "     two differ in mask 0x%02lx, which the comparison ignores; only\n"
+           "     one of them is really on the wire\n",
+           (unsigned long)dt_a, (unsigned long)dt_b, (unsigned long)(dt_a ^ dt_b));
+  }
+  else
+  {
+    printf("     undecided: no extra data from enabling both, but the two do not\n"
+           "     describe the same line either\n");
+  }
 }
 
 /**

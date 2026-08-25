@@ -150,6 +150,8 @@ static void print_help(void)
          "  probe [mbps]       characterise; without an argument it tries the\n"
          "                     known-good setting and then sweeps\n"
          "  phy <mbps> [lanes] [swap]   apply one D-PHY setting without probing\n"
+         "  vcs [ms]           ask every virtual channel in turn whether anything\n"
+         "                     arrives on it, delimited or not (default 200 ms)\n"
          "  dt <vc>            identify the data types on one virtual channel\n"
          "  geom <vc>          measure lines and bytes per line of one channel\n"
          "  single <vc>        preview one channel, centred\n"
@@ -264,6 +266,12 @@ static void handle_command(char *line)
     {
       printf("CTRL: applying the D-PHY setting failed\n");
     }
+  }
+  else if (strncmp(line, "vcs", 3) == 0)
+  {
+    /* Stops and restarts every channel, so nothing may be capturing. */
+    csi_preview_stop();
+    csi_probe_vc_survey(arg_u32(line, 0U, 200U));
   }
   else if (strncmp(line, "dt", 2) == 0)
   {

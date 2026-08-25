@@ -106,6 +106,7 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 | `scan [ms] [slow]` | sweep lanes/mapping/bitrate; `slow` restarts the source per combination |
 | `probe [mbps]` | characterise; without an argument it tries the known-good setting first, then sweeps |
 | `phy <mbps> [lanes] [swap]` | apply one D-PHY setting directly, no probing |
+| `vcs [ms]` | ask each of VC0..VC3 in turn whether anything arrives on it, with the data type filter wide open. Finds channels that send no frame delimiters, which a probe run cannot. Needs a link but no power-cycle |
 | `dt [vc]` | walk every candidate data type on one channel and print the full table; VC 0 by default. Takes a few seconds, needs no power-cycle |
 | `geom [vc]` | measure lines and bytes per line of one channel, and print the monotonicity check; VC 0 by default |
 | `single <vc>` | preview one channel, centred |
@@ -135,6 +136,21 @@ end-of-frame flag per channel. The probe starts all four channels, then polls
 and clears those flags for the length of the window. Counting end-of-frame gives
 both presence and frame rate.
 
+That test only sees channels that send **frame delimiters**. A channel carrying
+long packets without a frame start - metadata, embedded data, a generator that
+was configured for a continuous stream - is invisible to it, and so is a channel
+whose delimiters the receiver rejects. `vcs` closes that gap: it takes each
+channel in turn, opens its data type filter completely, arms the line counter on
+that channel and watches for the length of a window. Long packets with no frame
+start show up as data with `frame starts: no`, and the command says so.
+
+What neither test can see is a source using the **extended virtual channels**
+CSI-2 v2.0 added. This receiver has start, stop, status and filtering registers
+for VC0..VC3 only - there is no `VCX` field anywhere in the CSI register block -
+so a transmitter sending on VC4..VC15 produces silence here, not an error. `vcs`
+says that out loud when it finds only one channel, because "we found one" and
+"there is only one" are different statements.
+
 **Data type** - the probe offers the channel **one** data type at a time and
 watches whether data flows. For each of the 28 plausible long-packet types (the
 CSI-2 image range plus the user-defined block) it sets the channel's filter to
@@ -147,6 +163,21 @@ The whole 28-row table is printed, not a summary, and the decision rule is state
 underneath. If *every* candidate accepts, the counter is not gated by the data
 type filter and the column proves nothing - the table says so rather than
 returning a confident wrong answer.
+
+**When two data types accept, one more measurement decides between them.** The
+hardware produced exactly that: `0x2b` (RAW10) and `0x2f` (RAW20) both let the
+same stream through. Two accepted values mean either two streams the receiver
+keeps apart, or one stream its filter cannot. Enabling **both at once** tells
+them apart: two streams add up, one stream counted twice does not. The shape of
+a line is the second, independent signal - two different formats of the same
+picture cannot have the same number of bytes per line. The probe runs both and
+prints the verdict along with the numbers behind it.
+
+For `0x2b` / `0x2f` there is also a decisive argument from the register map:
+the receiver's word-format field stops at `DCMIPP_CSI_DT_BPP16`. It has no
+20-bit setting at all, so RAW20 is a value this DCMIPP can name but not receive.
+The tie-break in the walk prefers the type the receiver has a word format for,
+for exactly that reason.
 
 This replaced a method that read the data type straight out of `CSI_ERR1` after
 narrowing the filter to a reserved type, so that every packet would name itself
@@ -439,22 +470,14 @@ now clears the flags and the HAL error code after stopping.
 
 ## 7. Not done
 
-- The **preview has never started**. `single 0` failed in
-  `HAL_DCMIPP_CSI_PIPE_Start()` on the guard that requires the DCMIPP to be in
-  serial mode: `CMCR.INSEL` read back as parallel. That register is written by
-  `HAL_DCMIPP_CSI_PIPE_SetConfig()`, but only while the handle is in `INIT` or
-  `READY` - in any other state the function writes nothing at all, returns
-  `HAL_OK` and then sets the state to `READY`, which erases the evidence. The
-  preview now sets `CMCR.INSEL` and `P1FSCR` itself when the call left the
-  DCMIPP in parallel mode, and records the handle state either side of the call
-  so a repeat failure says which of the two it was. Not yet re-run on hardware.
+- `dual` has **never run**: only one channel has ever been found, so the
+  per-frame `P1FSCR.VC` switch described above is still an untested assumption.
+  `single 0` works - 1920x1080 RAW10 downsized to 400x225 on the display.
 - The receiver's data type filter **does not distinguish `0x2b` from `0x2f`**.
-  Both accept the same RAW10 stream and both come back with an identical count,
-  so the walk cannot separate them and breaks the tie towards the type CSI-2
-  defines. The two differ in one bit. Whether the comparison masks that bit, or
-  something else is going on, has not been established - only that the ambiguity
-  is systematic rather than a corrupted header, which is what an equal count over
-  many frames rules out.
+  The walk now runs the joint test described in section 4 whenever exactly two
+  candidates accept, which decides between "two streams" and "one stream, two
+  matching filter values" from measurements rather than from the register map.
+  That test has not been run on hardware yet.
 - The rejection-count column of the walk is **not a discriminator**. It reads
   roughly 1050-1300 for every candidate including the correct one: it measures
   how fast the loop polls, not how many packets were refused. It is printed

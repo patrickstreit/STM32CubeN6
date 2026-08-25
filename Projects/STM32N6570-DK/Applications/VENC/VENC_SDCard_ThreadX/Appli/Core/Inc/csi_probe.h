@@ -182,6 +182,18 @@ bool csi_probe_scan(uint32_t window_ms, bool restart_source, csi_probe_phy_t *be
 void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *info);
 
 /**
+  * @brief  Ask every virtual channel in turn whether anything arrives on it.
+  * @param  window_ms  observation window per channel, minimum 100 ms
+  *
+  * Complements the frame-start flags of a probe run, which only report channels
+  * that send frame delimiters: this arms the line counter per channel with the
+  * data type filter wide open, so a channel carrying long packets without
+  * delimiters - metadata, embedded data - is still visible. Needs a running
+  * link but no source restart.
+  */
+void csi_probe_vc_survey(uint32_t window_ms);
+
+/**
   * @brief  Measure lines per frame and payload bytes per line of @p vc.
   * @note   Binary search on the CSI line/byte counter; no memory is written by
   *         the DCMIPP, so this is safe with an unknown resolution.
