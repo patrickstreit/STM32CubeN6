@@ -34,7 +34,10 @@ Status, from three hardware sessions so far:
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
 - The source takes **6 to 8 s** to start transmitting after a restart. Every
   wait for it is a timeout that ends on the clock, never a fixed delay.
-- `single 0` shows the picture on the display, downsized to 400x225.
+- `single 0` shows the picture on the display, downsized to 400x225. The Bayer
+  pattern is **RGGB**, established by stepping through all four with `bayer` and
+  looking at the screen - nothing in a CSI-2 stream states it. Colours land in
+  the right place; saturation is poor, which is expected and explained below.
 
 Everything below that is a measurement rather than a datasheet fact is marked as
 such.
@@ -134,6 +137,8 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 | `vcs [ms]` | ask each of VC0..VC3 in turn whether anything arrives on it, with the data type filter wide open. Finds channels that send no frame delimiters, which a probe run cannot. Needs a link but no power-cycle |
 | `dt [vc]` | walk every candidate data type on one channel and print the full table; VC 0 by default. Takes a few seconds, needs no power-cycle |
 | `geom [vc]` | measure lines and bytes per line of one channel, and print the monotonicity check; VC 0 by default |
+| `bayer <0-3>` | which corner of the Bayer cell is red - 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR. Takes effect on the next frame without stopping the pipe, so the four can be compared on a live picture |
+| `errors [ms]` | clear every CSI flag, then count what comes back next to the frame count over the same window |
 | `grab <vc> <dt> [n]` | dump the raw payload of one data type through the DCMIPP dump pipe and hexdump the first n bytes. Answers what a data type carries, not just how much of it there is |
 | `single <vc>` | preview one channel, centred |
 | `dual <vcL> <vcR>` | preview two channels side by side |
@@ -267,6 +272,30 @@ Two things about that pipe are worth knowing, both learned the hard way:
   the buffer's fill pattern, which is what `grab` checks before printing a dump -
   and it is also what separates "no packets" from "packets full of zeros", a
   distinction this source actually makes.
+
+### Why the picture looks washed out
+
+There is no exposure control and no white balance anywhere in this path, and
+there cannot be: both are sensor functions, driven over I2C, and no sensor is
+reachable from the STM32 here - the stream is generated externally. What the
+preview does is the minimum that makes a linear raw frame visible at all:
+demosaic, then the DCMIPP gamma curve.
+
+Missing, in the order that would help most, all of them DCMIPP blocks that need
+no sensor:
+
+- **black level** (`HAL_DCMIPP_PIPE_SetISPBlackLevelCalibrationConfig`) - a raw
+  sensor's black sits above zero, and not subtracting it is what greys out the
+  darks and flattens saturation most.
+- **per-channel gain** (`HAL_DCMIPP_PIPE_SetISPExposureConfig`) - the white
+  balance knob, one multiplier per colour, and the brightness knob with it.
+- **colour conversion matrix** (`HAL_DCMIPP_PIPE_SetISPColorConversionConfig`) -
+  a 3x3 that turns sensor primaries into display primaries. This is the one that
+  actually adds saturation rather than just brightness.
+
+None of this is needed to answer what the probe exists to answer, so none of it
+is implemented. It is listed because "the colours are right but the picture is
+flat" is the expected outcome here, not a symptom of something being wrong.
 
 ### What the data type error means
 

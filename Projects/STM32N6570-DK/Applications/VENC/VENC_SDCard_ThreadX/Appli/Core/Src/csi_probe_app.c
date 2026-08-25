@@ -168,6 +168,8 @@ static void print_help(void)
          "  grab <vc> <dt> [n] dump the raw payload of one data type through the\n"
          "                     DCMIPP dump pipe and print the first n bytes\n"
          "  single <vc>        preview one channel, centred\n"
+         "  bayer <0-3>        which corner of the Bayer cell is red, live:\n"
+         "                     0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR\n"
          "  dual <vcL> <vcR>   preview two channels side by side\n"
          "  off                stop the preview\n"
          "  errors [ms]        clear every CSI flag, then count what comes back,\n"
@@ -283,6 +285,10 @@ static void handle_command(char *line)
     {
       printf("CTRL: applying the D-PHY setting failed\n");
     }
+  }
+  else if (strncmp(line, "bayer", 5) == 0)
+  {
+    (void)csi_preview_set_bayer(arg_u32(line, 0U, 0U));
   }
   else if (strncmp(line, "grab", 4) == 0)
   {

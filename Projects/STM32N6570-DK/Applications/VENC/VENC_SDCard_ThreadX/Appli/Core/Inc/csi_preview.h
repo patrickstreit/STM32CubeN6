@@ -74,6 +74,16 @@ int csi_preview_dual(const csi_preview_source_t *left, const csi_preview_source_
 /** @brief Stop the capture and blank the screen. */
 void csi_preview_stop(void);
 
+/**
+  * @brief  Choose which corner of the Bayer cell is red: 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR.
+  * @retval 0 on success
+  *
+  * Nothing in a CSI-2 stream says this, so it cannot be probed - it has to be
+  * decided by looking at the picture. The write takes effect on the next frame
+  * without stopping the pipe, so the four can be compared on a live image.
+  */
+int csi_preview_set_bayer(uint32_t pattern);
+
 /** @brief Per-frame hook; call from BSP_CAMERA_FrameEventCallback() for PIPE1. */
 void csi_preview_on_pipe1_frame(void);
 

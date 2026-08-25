@@ -40,6 +40,11 @@ static uint32_t             preview_tile_count[2];
 static volatile uint32_t    preview_next_tile;   /* tile the pipe is currently filling */
 static bool                 lcd_ready;
 
+/* Which corner of the 2x2 Bayer cell is red. RGGB - checked against this source
+   by stepping through all four with 'bayer' and looking at the picture, which is
+   the only way to decide it: nothing in a CSI-2 stream states the pattern. */
+static uint32_t             preview_bayer = DCMIPP_RAWBAYER_RGGB;
+
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
 /* ------------------------------------------------------------------------- */
@@ -139,11 +144,11 @@ static HAL_StatusTypeDef preview_configure_pipe1(const csi_preview_source_t *src
       (src->dt == DCMIPP_DT_RAW12) || (src->dt == DCMIPP_DT_RAW14))
   {
     /* Bayer pattern is a property of the sensor and cannot be probed from the
-       CSI side. RGGB matches the IMX335 wiring this board was built around; if
-       the colours come out swapped this is the constant to change. */
+       CSI side - nothing in the CSI-2 stream says which corner is red. It has to
+       be decided by looking at the picture, which is what 'bayer' is for. */
     DCMIPP_RawBayer2RGBConfTypeDef bayer =
     {
-      .RawBayerType  = DCMIPP_RAWBAYER_RGGB,
+      .RawBayerType  = preview_bayer,
       .PeakStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_4,
       .VLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
       .HLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
@@ -467,4 +472,43 @@ void csi_preview_print_stats(void)
 csi_preview_mode_t csi_preview_get_mode(void)
 {
   return preview_mode;
+}
+
+int csi_preview_set_bayer(uint32_t pattern)
+{
+  static const uint32_t patterns[4] =
+  {
+    DCMIPP_RAWBAYER_RGGB, DCMIPP_RAWBAYER_GRBG,
+    DCMIPP_RAWBAYER_GBRG, DCMIPP_RAWBAYER_BGGR
+  };
+  static const char *names[4] = { "RGGB", "GRBG", "GBRG", "BGGR" };
+
+  DCMIPP_RawBayer2RGBConfTypeDef bayer =
+  {
+    .PeakStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_4,
+    .VLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
+    .HLineStrength = DCMIPP_RAWBAYER_ALGO_STRENGTH_8,
+    .EdgeStrength  = DCMIPP_RAWBAYER_ALGO_STRENGTH_16,
+  };
+
+  if (pattern > 3U)
+  {
+    printf("PREVIEW: bayer takes 0..3 - 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR\n");
+    return -1;
+  }
+
+  preview_bayer      = patterns[pattern];
+  bayer.RawBayerType = preview_bayer;
+
+  /* The demosaic configuration is a single register write with no state guard,
+     so this takes effect on the next frame without stopping the pipe - which is
+     the point: the four patterns can be compared on a live picture. */
+  if (HAL_DCMIPP_PIPE_SetISPRawBayer2RGBConfig(&hcamera_dcmipp, DCMIPP_PIPE1, &bayer) != HAL_OK)
+  {
+    printf("PREVIEW: could not set the Bayer pattern\n");
+    return -1;
+  }
+
+  printf("PREVIEW: Bayer pattern %lu (%s)\n", (unsigned long)pattern, names[pattern]);
+  return 0;
 }
