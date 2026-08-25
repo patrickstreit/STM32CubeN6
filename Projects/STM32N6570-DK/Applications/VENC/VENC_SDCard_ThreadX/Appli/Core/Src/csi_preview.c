@@ -251,6 +251,37 @@ void csi_preview_stop(void)
   }
 }
 
+/**
+  * @brief  Say why HAL_DCMIPP_CSI_PIPE_Start() refused.
+  *
+  * It has three entry guards and returns the same HAL_ERROR for all of them, so
+  * the message alone leaves nothing to act on. Each is cheap to read back.
+  */
+static void preview_report_start_failure(uint32_t vc, uint32_t addr)
+{
+  uint32_t insel = READ_BIT(hcamera_dcmipp.Instance->CMCR, DCMIPP_CMCR_INSEL);
+
+  printf("PREVIEW: could not start PIPE1 on VC%lu' + N + '", (unsigned long)vc);
+
+  if ((addr & 0xFU) != 0U)
+  {
+    printf("         destination 0x%08lx is not 16-byte aligned' + N + '", (unsigned long)addr);
+  }
+  if (hcamera_dcmipp.PipeState[DCMIPP_PIPE1] != HAL_DCMIPP_PIPE_STATE_READY)
+  {
+    printf("         PIPE1 state is %d, not READY' + N + '",
+           (int)hcamera_dcmipp.PipeState[DCMIPP_PIPE1]);
+  }
+  if (insel != DCMIPP_SERIAL_MODE)
+  {
+    /* HAL_DCMIPP_CSI_PIPE_SetConfig() only writes CMCR.INSEL when the handle is
+       in INIT or READY; in any other state it silently does nothing and still
+       returns HAL_OK, so the pipe configuration above can appear to succeed. */
+    printf("         DCMIPP is in parallel mode - CSI_PIPE_SetConfig did not take' + N + '"
+           "         effect, handle state is %d' + N + '", (int)hcamera_dcmipp.State);
+  }
+}
+
 int csi_preview_single(const csi_preview_source_t *src)
 {
   if (src == NULL)
@@ -276,7 +307,7 @@ int csi_preview_single(const csi_preview_source_t *src)
   if (HAL_DCMIPP_CSI_PIPE_Start(&hcamera_dcmipp, DCMIPP_PIPE1, preview_src[0].vc,
                                 preview_tile_addr[0], CAMERA_MODE_CONTINUOUS) != HAL_OK)
   {
-    printf("PREVIEW: could not start PIPE1 on VC%lu\n", (unsigned long)preview_src[0].vc);
+    preview_report_start_failure(preview_src[0].vc, preview_tile_addr[0]);
     return -1;
   }
 
@@ -337,7 +368,7 @@ int csi_preview_dual(const csi_preview_source_t *left, const csi_preview_source_
   if (HAL_DCMIPP_CSI_PIPE_Start(&hcamera_dcmipp, DCMIPP_PIPE1, preview_src[0].vc,
                                 preview_tile_addr[0], CAMERA_MODE_CONTINUOUS) != HAL_OK)
   {
-    printf("PREVIEW: could not start PIPE1 on VC%lu\n", (unsigned long)preview_src[0].vc);
+    preview_report_start_failure(preview_src[0].vc, preview_tile_addr[0]);
     return -1;
   }
 

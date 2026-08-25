@@ -1068,7 +1068,16 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
       {
         info->dt_mask_hi |= (1UL << (dt - 32U));
       }
-      if (!found || (lb_hit[i] > lb_hit[best_idx]))
+      /* Most data wins; on a tie prefer a data type CSI-2 actually defines.
+         The receiver's filter turned out not to distinguish 0x2b from 0x2f -
+         they differ in one bit, both accept the same RAW10 stream, and both
+         come back with an identical count - but only 0x2b is a real data type.
+         Without this the choice between them was decided by which frame
+         boundary the window happened to straddle, and picking 0x2f left the
+         geometry running at 8 bpp on a 10 bpp stream. */
+      if (!found || (lb_hit[i] > lb_hit[best_idx]) ||
+          ((lb_hit[i] == lb_hit[best_idx]) && (csi_probe_dt_bpp(dt) != 0U) &&
+           (csi_probe_dt_bpp(csi_dt_candidates[best_idx]) == 0U)))
       {
         best_idx = i;
         found    = true;
@@ -1105,7 +1114,7 @@ void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *i
     info->image_dt   = csi_dt_candidates[best_idx];
     info->dt_corrupt = accepted - 1U;
     printf("CSI: VC%lu %lu candidates accepted data; picking 0x%02lx (%s), the one\n"
-           "     that accepted the most\n",
+           "     that accepted the most, preferring a defined data type on a tie\n",
            (unsigned long)vc, (unsigned long)accepted,
            (unsigned long)info->image_dt, csi_probe_dt_name(info->image_dt));
     if (accepted == CSI_DT_CANDIDATE_COUNT)
@@ -1261,6 +1270,8 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
   const uint32_t timeout_ms = 120U;
   DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
   uint32_t first_bytes;
+  uint32_t line_max;
+  uint32_t byte_max;
   uint32_t bpp;
   bool     lines_ok;
   bool     bytes_ok;
@@ -1291,45 +1302,42 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
     printf("CSI: VC%lu did not report the active state; measuring anyway\n", (unsigned long)vc);
   }
 
-  info->lines = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
+  /* Everything below is a counter *index*; the +1 that turns each into a count
+     happens after the checks, which have to compare like for like. */
+  line_max = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
 
   /* The first line, kept only for comparison. */
   g_byte_probe_line = 1U;
   first_bytes       = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
 
   /* And the middle of the frame, which is where an image line is most likely. */
-  g_byte_probe_line    = (info->lines > 2U) ? (info->lines / 2U) : 1U;
-  info->bytes_per_line = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
+  g_byte_probe_line = (line_max > 2U) ? (line_max / 2U) : 1U;
+  byte_max          = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
 
   printf("CSI: VC%lu geometry, counter 0 reading the channel as %s\n", (unsigned long)vc,
          (csi_probe_dt_bpp(info->image_dt) != 0U) ? "the identified format"
                                                   : "8 bpp (format unknown)");
-  lines_ok = geom_verify(vc, info->lines, timeout_ms, probe_line, "lines     ");
-  bytes_ok = geom_verify(vc, info->bytes_per_line, timeout_ms, probe_byte, "bytes/line");
+  lines_ok = geom_verify(vc, line_max, timeout_ms, probe_line, "lines     ");
+  bytes_ok = geom_verify(vc, byte_max, timeout_ms, probe_byte, "bytes/line");
 
-  if (first_bytes != info->bytes_per_line)
+  /* The counters match on an index, so the last line of a 1080-line frame is
+     1079 and the last byte of a 2400-byte line is 2399. Measuring 1919x1079 for
+     a 1920x1080 RAW10 source is what made this obvious. */
+  info->lines          = (lines_ok) ? (line_max + 1U) : 0U;
+  info->bytes_per_line = (bytes_ok) ? (byte_max + 1U) : 0U;
+
+  if (first_bytes != byte_max)
   {
     printf("CSI:   line 1 is %lu bytes, line %lu is %lu - the frame is not\n"
            "         uniform, so some of those lines are not image lines\n",
-           (unsigned long)first_bytes, (unsigned long)g_byte_probe_line,
-           (unsigned long)info->bytes_per_line);
+           (unsigned long)(first_bytes + 1U), (unsigned long)g_byte_probe_line,
+           (unsigned long)(byte_max + 1U));
   }
 
   csi_stop_all_vc();
   /* Leave the channel accepting everything again. */
   (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, csi_probe_dt_bpp_code(info->image_dt));
   HAL_NVIC_EnableIRQ(CSI_IRQn);
-
-  /* A number that failed its own check is worse than no number: it looks like a
-     resolution and would be used as one. */
-  if (!lines_ok)
-  {
-    info->lines = 0U;
-  }
-  if (!bytes_ok)
-  {
-    info->bytes_per_line = 0U;
-  }
 
   bpp = csi_probe_dt_bpp(info->image_dt);
   if ((bpp != 0U) && (info->bytes_per_line != 0U))
