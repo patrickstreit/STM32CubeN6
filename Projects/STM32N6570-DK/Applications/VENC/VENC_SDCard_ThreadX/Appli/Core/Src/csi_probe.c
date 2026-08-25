@@ -92,11 +92,6 @@ static const uint32_t vc_stop_bit[CSI_PROBE_VC_COUNT] =
                               CSI_SR1_ESOTDL1F | CSI_SR1_ESOTSYNCDL1F | CSI_SR1_EESCDL1F | \
                               CSI_SR1_ESYNCESCDL1F | CSI_SR1_ECTRLDL1F)
 
-/* Data type the probe asks the receiver to accept while identifying what the
-   source really sends. 0x30 is in the CSI-2 reserved range, so no sane
-   transmitter uses it and every incoming packet is reported as an ID error. */
-#define CSI_PROBE_IMPOSSIBLE_DT  0x30U
-
 /* ------------------------------------------------------------------------- */
 /* Data type helpers                                                         */
 /* ------------------------------------------------------------------------- */
@@ -157,12 +152,6 @@ uint32_t csi_probe_dt_bpp_code(uint32_t dt)
     case 16U: return DCMIPP_CSI_DT_BPP16;
     default:  return DCMIPP_CSI_DT_BPP8;
   }
-}
-
-/** @brief Is this data type a long packet carrying image lines? */
-static bool dt_is_image(uint32_t dt)
-{
-  return (dt >= 0x18U) && (dt <= 0x37U);
 }
 
 /** @brief Was data type @p dt observed on this virtual channel? */
@@ -927,106 +916,200 @@ bool csi_probe_refine(csi_probe_phy_t *phy, uint32_t neighbours, uint32_t window
 /* Data type identification                                                  */
 /* ------------------------------------------------------------------------- */
 
+/* Long-packet data types worth trying: the CSI-2 image range plus the
+   user-defined block, which is where a bridge or an FPGA usually puts a format
+   the standard does not cover. Short packets - the frame and line delimiters -
+   are deliberately absent. They are not subject to data type filtering, so they
+   cannot be identified this way, and pretending otherwise produced an "other
+   packets:" line that was permanently empty. */
+static const uint8_t csi_dt_candidates[] =
+{
+  0x18U, 0x19U, 0x1AU, 0x1CU, 0x1DU, 0x1EU, 0x1FU,          /* YUV           */
+  0x20U, 0x21U, 0x22U, 0x23U, 0x24U,                        /* RGB           */
+  0x28U, 0x29U, 0x2AU, 0x2BU, 0x2CU, 0x2DU, 0x2EU, 0x2FU,   /* RAW6 .. RAW20 */
+  0x30U, 0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U    /* user defined  */
+};
+#define CSI_DT_CANDIDATE_COUNT (sizeof(csi_dt_candidates) / sizeof(csi_dt_candidates[0]))
+
+/**
+  * @brief  Offer the receiver exactly one data type and see whether data flows.
+  * @param  lb_hit  out: the line/byte counter reached line 1 byte 1, so a long
+  *                 packet of this data type was accepted into the datapath
+  * @param  id_err  out: how often the ID error flag re-asserted after being
+  *                 cleared - roughly, how many packets were rejected
+  *
+  * Two independent signals on purpose. The first reads the datapath, the second
+  * the error path, and they come from different registers; if one of them turns
+  * out to be useless that shows up as a column of identical values rather than
+  * as a wrong answer.
+  */
+static void dt_trial(uint32_t vc, uint32_t dt, uint32_t window_ms,
+                     bool *lb_hit, uint32_t *id_err)
+{
+  DCMIPP_CSI_VCFilteringConfTypeDef     filter = {0};
+  DCMIPP_CSI_LineByteCounterConfTypeDef cnt    = {0};
+  uint32_t tickstart;
+
+  *lb_hit = false;
+  *id_err = 0U;
+
+  csi_stop_all_vc();
+
+  /* Accept this data type and nothing else. */
+  filter.DataTypeNB        = 1U;
+  filter.DataTypeClass[0]  = dt;
+  filter.DataTypeFormat[0] = csi_probe_dt_bpp_code(dt);
+  (void)HAL_DCMIPP_CSI_SetVCFilteringConfig(&hcamera_dcmipp, vc, &filter);
+
+  cnt.VirtualChannel = vc;
+  cnt.LineCounter    = 1U;
+  cnt.ByteCounter    = 1U;
+  (void)HAL_DCMIPP_CSI_SetLineByteCounterConfig(&hcamera_dcmipp, DCMIPP_CSI_COUNTER0, &cnt);
+
+  (void)csi_start_vc(vc, window_ms);
+
+  SET_BIT(CSI->PRGITR, CSI_PRGITR_LB0EN);
+  CSI->FCR0 = 0xFFFFFFFFU;
+
+  tickstart = HAL_GetTick();
+  while ((HAL_GetTick() - tickstart) < window_ms)
+  {
+    uint32_t sr0 = CSI->SR0;
+
+    if ((sr0 & CSI_SR0_LB0F) != 0U)
+    {
+      *lb_hit   = true;
+      CSI->FCR0 = CSI_SR0_LB0F;
+    }
+    if ((sr0 & CSI_SR0_IDERRF) != 0U)
+    {
+      /* Clearing the flag and counting how often it comes back measures a rate.
+         Reading the data type out of CSI_ERR1 instead does not: that field
+         latches and is not re-armed by clearing the status flag, so a polling
+         loop reads one stale value thousands of times and then reports it as an
+         overwhelming majority. That is why every link - clean or marginal, at
+         every bitrate - named the same single data type. */
+      (*id_err)++;
+      CSI->FCR0 = CSI_SR0_IDERRF;
+    }
+  }
+
+  CLEAR_BIT(CSI->PRGITR, CSI_PRGITR_LB0EN);
+  csi_stop_all_vc();
+}
+
 void csi_probe_datatypes(uint32_t vc, uint32_t window_ms, csi_probe_vc_info_t *info)
 {
-  DCMIPP_CSI_VCFilteringConfTypeDef filter = {0};
-  uint32_t tickstart;
-  static uint32_t dt_count[CSI_PROBE_DT_COUNT];   /* static: 256 B off the stack */
+  /* static: keeps ~150 bytes off a thread stack that is only 4 kB. */
+  static uint32_t id_err[CSI_DT_CANDIDATE_COUNT];
+  static bool     lb_hit[CSI_DT_CANDIDATE_COUNT];
+  uint32_t accepted = 0U;
+  uint32_t quietest = 0U;
+  uint32_t best_idx = 0U;
+  uint32_t per_dt_ms;
+  bool     found    = false;
 
   if ((info == NULL) || (vc >= CSI_PROBE_VC_COUNT))
   {
     return;
   }
 
-  info->dt_mask_lo = 0U;
-  info->dt_mask_hi = 0U;
-  info->image_dt   = 0U;
-  memset(dt_count, 0, sizeof(dt_count));
+  info->dt_mask_lo     = 0U;
+  info->dt_mask_hi     = 0U;
+  info->image_dt       = 0U;
+  info->image_dt_count = 0U;
+  info->dt_corrupt     = 0U;
+
+  /* Enough for several frame periods per candidate, so "no data" means absence
+     rather than a window that happened to fall into vertical blanking. */
+  per_dt_ms = window_ms / 2U;
+  if (per_dt_ms < 100U)
+  {
+    per_dt_ms = 100U;
+  }
 
   HAL_NVIC_DisableIRQ(CSI_IRQn);
-  csi_stop_all_vc();
 
-  /* Narrow the filter to a data type nothing can be sending. Every real packet
-     then raises an ID error and CSI_ERR1 names the data type that arrived. */
-  filter.DataTypeNB        = 1U;
-  filter.DataTypeClass[0]  = CSI_PROBE_IMPOSSIBLE_DT;
-  filter.DataTypeFormat[0] = DCMIPP_CSI_DT_BPP8;
-  (void)HAL_DCMIPP_CSI_SetVCFilteringConfig(&hcamera_dcmipp, vc, &filter);
-
-  if (!csi_start_vc(vc, 150U))
+  for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
   {
-    printf("CSI: VC%lu did not report the active state; identifying anyway\n",
-           (unsigned long)vc);
+    dt_trial(vc, csi_dt_candidates[i], per_dt_ms, &lb_hit[i], &id_err[i]);
   }
 
-  CSI->FCR0 = 0xFFFFFFFFU;
-
-  tickstart = HAL_GetTick();
-  while ((HAL_GetTick() - tickstart) < window_ms)
-  {
-    if ((CSI->SR0 & CSI_SR0_IDERRF) != 0U)
-    {
-      uint32_t err1   = CSI->ERR1;
-      uint32_t err_dt = (err1 & CSI_ERR1_IDDTERR) >> CSI_ERR1_IDDTERR_Pos;
-      uint32_t err_vc = (err1 & CSI_ERR1_IDVCERR) >> CSI_ERR1_IDVCERR_Pos;
-
-      /* ERR1 only holds the most recent offender, so the loop samples it as
-         fast as it can and accumulates the set of data types it ever saw. */
-      CSI->FCR0 = CSI_SR0_IDERRF;
-
-      if (err_vc == vc)
-      {
-        if (err_dt < 32U)
-        {
-          info->dt_mask_lo |= (1UL << err_dt);
-        }
-        else
-        {
-          info->dt_mask_hi |= (1UL << (err_dt - 32U));
-        }
-        if (dt_count[err_dt] < 0xFFFFFFFFU)
-        {
-          dt_count[err_dt]++;
-        }
-      }
-    }
-  }
-
-  csi_stop_all_vc();
-
-  /* Put the channel back to "accept everything" so nothing downstream trips
+  /* Leave the channel accepting everything again, so nothing downstream trips
      over a filter the probe left behind. */
   (void)HAL_DCMIPP_CSI_SetVCConfig(&hcamera_dcmipp, vc, DCMIPP_CSI_DT_BPP8);
   HAL_NVIC_EnableIRQ(CSI_IRQn);
 
-  /* The image data type is the long-packet type that arrived most often.
-     Picking the lowest-numbered one instead would be wrong on a marginal link:
-     an ECC error the receiver cannot correct turns a data type into a
-     neighbouring value, and RAW10 (0x2b) corrupted into 0x2f is indistinguishable
-     from a genuine data type on a single observation. The real one dominates by
-     orders of magnitude, a corrupted one appears a handful of times. */
+  /* The whole table, not a summary. A summary is what hid the fact that the
+     previous method only ever saw a single value. */
+  printf("CSI: VC%lu data type walk, %lu ms per candidate\n",
+         (unsigned long)vc, (unsigned long)per_dt_ms);
+  printf("        DT   name          data  rejected\n");
+  for (uint32_t i = 0U; i < CSI_DT_CANDIDATE_COUNT; i++)
   {
-    uint32_t best_count = 0U;
+    printf("       0x%02x  %-12s  %-4s  %lu\n",
+           (unsigned)csi_dt_candidates[i],
+           csi_probe_dt_name(csi_dt_candidates[i]),
+           lb_hit[i] ? "yes" : "-",
+           (unsigned long)id_err[i]);
 
-    for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
+    if (lb_hit[i])
     {
-      if (dt_is_image(dt) && (dt_count[dt] > best_count))
+      uint32_t dt = csi_dt_candidates[i];
+
+      accepted++;
+      if (dt < 32U)
       {
-        best_count     = dt_count[dt];
-        info->image_dt = dt;
+        info->dt_mask_lo |= (1UL << dt);
+      }
+      else
+      {
+        info->dt_mask_hi |= (1UL << (dt - 32U));
+      }
+      if (!found || (id_err[i] < id_err[best_idx]))
+      {
+        best_idx = i;
+        found    = true;
       }
     }
-    info->image_dt_count = best_count;
-
-    /* Anything else that looked like an image type is header corruption, and
-       saying so is more useful than silently dropping it. */
-    info->dt_corrupt = 0U;
-    for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
+    if (id_err[i] < id_err[quietest])
     {
-      if (dt_is_image(dt) && (dt != info->image_dt) && (dt_count[dt] != 0U))
-      {
-        info->dt_corrupt += dt_count[dt];
-      }
+      quietest = i;
+    }
+  }
+
+  info->image_dt_count = accepted;
+
+  if (accepted == 1U)
+  {
+    info->image_dt = csi_dt_candidates[best_idx];
+    printf("CSI: VC%lu carries 0x%02lx (%s) - the only type the datapath accepted\n",
+           (unsigned long)vc, (unsigned long)info->image_dt,
+           csi_probe_dt_name(info->image_dt));
+  }
+  else if (accepted == 0U)
+  {
+    /* Either nothing is arriving, or the line/byte counter is not gated by the
+       data type filter and therefore says nothing. Fall back to the rejection
+       rate and label the answer as the weaker evidence it is. */
+    info->image_dt = csi_dt_candidates[quietest];
+    printf("CSI: VC%lu no candidate let data through; falling back to the lowest\n"
+           "     rejection count, 0x%02lx (%s) - treat this as a guess\n",
+           (unsigned long)vc, (unsigned long)info->image_dt,
+           csi_probe_dt_name(info->image_dt));
+  }
+  else
+  {
+    info->image_dt   = csi_dt_candidates[best_idx];
+    info->dt_corrupt = accepted - 1U;
+    printf("CSI: VC%lu %lu candidates accepted data; picking 0x%02lx (%s), the one\n"
+           "     that rejected fewest packets\n",
+           (unsigned long)vc, (unsigned long)accepted,
+           (unsigned long)info->image_dt, csi_probe_dt_name(info->image_dt));
+    if (accepted == CSI_DT_CANDIDATE_COUNT)
+    {
+      printf("     every candidate accepted, so the counter is not filtered by\n"
+             "     data type and this column proves nothing\n");
     }
   }
 }
@@ -1072,21 +1155,24 @@ static bool csi_reaches(uint32_t vc, uint32_t line, uint32_t byte, uint32_t time
   return reached;
 }
 
+/* Byte 1 rather than byte 0 on both axes. Whether a byte count of zero ever
+   counts as reached is not documented, and using one convention for both
+   searches at least makes the two comparable. */
 static bool probe_line(uint32_t vc, uint32_t value, uint32_t timeout_ms)
 {
-  return csi_reaches(vc, value, 0U, timeout_ms);
+  return csi_reaches(vc, value, 1U, timeout_ms);
 }
 
 static bool probe_byte(uint32_t vc, uint32_t value, uint32_t timeout_ms)
 {
-  /* Line 1, so the byte counter refers to bytes inside the first line. */
+  /* Line 1, so the byte counter refers to bytes inside a single line. */
   return csi_reaches(vc, 1U, value, timeout_ms);
 }
 
 /**
   * @brief  Largest value in [1, @p hi] for which @p reached still fires.
-  * @note   Monotonic by construction: if a frame reaches byte/line N it also
-  *         reached every smaller one, so a binary search is exact.
+  * @note   Only exact if "reaches N" is monotonic in N, which geom_verify()
+  *         checks afterwards rather than assuming.
   */
 static uint32_t csi_search_max(uint32_t vc, uint32_t hi, uint32_t timeout_ms,
                                bool (*reached)(uint32_t vc, uint32_t value, uint32_t timeout_ms))
@@ -1115,11 +1201,60 @@ static uint32_t csi_search_max(uint32_t vc, uint32_t hi, uint32_t timeout_ms,
   return best;
 }
 
+/**
+  * @brief  Check a search result against the assumption the search rests on.
+  * @retval true if the four probe points are consistent with monotonicity
+  *
+  * The binary search is only meaningful if "reaches N" is monotonic in N. When
+  * the counter fires on something else - a rate, a wrap-around, a value that is
+  * never reached at all - the search still returns a number, and that number is
+  * indistinguishable from a measurement. Four extra probes cost a few frame
+  * periods and turn it into a claim that can visibly fail.
+  */
+static bool geom_verify(uint32_t vc, uint32_t best, uint32_t timeout_ms,
+                        bool (*reached)(uint32_t vc, uint32_t value, uint32_t timeout_ms),
+                        const char *what)
+{
+  bool at_one;
+  bool at_half;
+  bool at_best;
+  bool past;
+  bool ok;
+
+  if (best == 0U)
+  {
+    printf("CSI:   %s: not even 1 was reached - the counter never fired\n", what);
+    return false;
+  }
+
+  at_one  = reached(vc, 1U, timeout_ms);
+  at_half = reached(vc, (best / 2U) + 1U, timeout_ms);
+  at_best = reached(vc, best, timeout_ms);
+  past    = reached(vc, best + 1U, timeout_ms);
+  ok      = at_one && at_half && at_best && (!past);
+
+  printf("CSI:   %s = %lu   [1:%s  %lu:%s  %lu:%s  %lu:%s]\n",
+         what, (unsigned long)best,
+         at_one ? "y" : "N",
+         (unsigned long)((best / 2U) + 1U), at_half ? "y" : "N",
+         (unsigned long)best,               at_best ? "y" : "N",
+         (unsigned long)(best + 1U),        past    ? "Y" : "n");
+
+  if (!ok)
+  {
+    printf("CSI:   ^ not monotonic, so this number is not a measurement\n");
+  }
+  return ok;
+}
+
 void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
 {
-  /* Roughly three frame periods at 30 fps, so a miss is a real miss. */
+  /* Several frame periods, so a miss is a real miss rather than a window that
+     fell between two frames. */
   const uint32_t timeout_ms = 120U;
   uint32_t bpp;
+  bool     lines_ok;
+  bool     bytes_ok;
 
   if ((info == NULL) || (vc >= CSI_PROBE_VC_COUNT))
   {
@@ -1142,8 +1277,25 @@ void csi_probe_geometry(uint32_t vc, csi_probe_vc_info_t *info)
   info->lines          = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_line);
   info->bytes_per_line = csi_search_max(vc, 0xFFFFU, timeout_ms, probe_byte);
 
+  printf("CSI: VC%lu geometry, counter 0 reading the channel as %s\n", (unsigned long)vc,
+         (csi_probe_dt_bpp(info->image_dt) != 0U) ? "the identified format"
+                                                  : "8 bpp (format unknown)");
+  lines_ok = geom_verify(vc, info->lines, timeout_ms, probe_line, "lines     ");
+  bytes_ok = geom_verify(vc, info->bytes_per_line, timeout_ms, probe_byte, "bytes/line");
+
   csi_stop_all_vc();
   HAL_NVIC_EnableIRQ(CSI_IRQn);
+
+  /* A number that failed its own check is worse than no number: it looks like a
+     resolution and would be used as one. */
+  if (!lines_ok)
+  {
+    info->lines = 0U;
+  }
+  if (!bytes_ok)
+  {
+    info->bytes_per_line = 0U;
+  }
 
   bpp = csi_probe_dt_bpp(info->image_dt);
   if ((bpp != 0U) && (info->bytes_per_line != 0U))
@@ -1331,25 +1483,28 @@ void csi_probe_print_report(const csi_probe_report_t *report, const csi_probe_ph
     }
     printf("\n");
 
-    if (info[vc].dt_corrupt != 0U)
+    if (info[vc].image_dt_count == 0U)
     {
-      /* Other image data types were seen. On a clean link that would mean the
-         source really sends two of them; here it almost always means corrupted
-         headers, so give the ratio rather than a verdict. */
-      printf("        data type seen %lu times, %lu other image types "
-             "(header corruption unless the source really sends both)\n",
-             (unsigned long)info[vc].image_dt_count, (unsigned long)info[vc].dt_corrupt);
+      printf("        no data type let data through - the one above is just the\n"
+             "        one that rejected fewest packets, not a measurement\n");
     }
-
-    printf("        other packets:");
-    for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
+    else if (info[vc].dt_corrupt != 0U)
     {
-      if (dt_seen(&info[vc], dt) && !dt_is_image(dt))
+      /* More than one data type was accepted into the datapath. Either the
+         source really sends several, or the line/byte counter is not gated by
+         the data type filter at all - the table printed by 'dt' tells the two
+         apart, because in the second case every candidate accepts. */
+      printf("        %lu other data type(s) also accepted:",
+             (unsigned long)info[vc].dt_corrupt);
+      for (uint32_t dt = 0U; dt < CSI_PROBE_DT_COUNT; dt++)
       {
-        printf(" 0x%02lx(%s)", (unsigned long)dt, csi_probe_dt_name(dt));
+        if (dt_seen(&info[vc], dt) && (dt != info[vc].image_dt))
+        {
+          printf(" 0x%02lx(%s)", (unsigned long)dt, csi_probe_dt_name(dt));
+        }
       }
+      printf("\n");
     }
-    printf("\n");
   }
 
   printf("==========================\n\n");

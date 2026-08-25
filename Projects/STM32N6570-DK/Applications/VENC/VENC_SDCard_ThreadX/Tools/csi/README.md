@@ -103,8 +103,8 @@ VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
 | `scan [ms] [slow]` | sweep lanes/mapping/bitrate; `slow` restarts the source per combination |
 | `probe [mbps]` | characterise; without an argument it tries the known-good setting first, then sweeps |
 | `phy <mbps> [lanes] [swap]` | apply one D-PHY setting directly, no probing |
-| `dt <vc>` | identify the data types on one virtual channel |
-| `geom <vc>` | measure lines and bytes per line of one channel |
+| `dt [vc]` | walk every candidate data type on one channel and print the full table; VC 0 by default. Takes a few seconds, needs no power-cycle |
+| `geom [vc]` | measure lines and bytes per line of one channel, and print the monotonicity check; VC 0 by default |
 | `single <vc>` | preview one channel, centred |
 | `dual <vcL> <vcR>` | preview two channels side by side |
 | `off` | stop the preview |
@@ -132,28 +132,41 @@ end-of-frame flag per channel. The probe starts all four channels, then polls
 and clears those flags for the length of the window. Counting end-of-frame gives
 both presence and frame rate.
 
-**Data type** - `CSI_ERR1` reports the data type *and* the virtual channel of any
-packet the receiver could not match to a configured filter. So the probe narrows
-the channel's filter to data type `0x30` (CSI-2 reserved, nothing sends it), and
-every arriving packet then names itself.
+**Data type** - the probe offers the channel **one** data type at a time and
+watches whether data flows. For each of the 28 plausible long-packet types (the
+CSI-2 image range plus the user-defined block) it sets the channel's filter to
+accept only that type, then measures two things over a window: whether the
+line/byte counter reaches line 1 byte 1, and how often the ID error flag
+re-asserts after being cleared. The first reads the datapath, the second the
+error path. The type that lets data through is the one the source sends.
 
-The winner is the long-packet type that arrived **most often**, not the first one
-seen. On a marginal link that distinction matters: a header ECC error the
-receiver cannot correct changes the data type value, and RAW10 (`0x2b`) corrupted
-into `0x2f` is indistinguishable from a real data type on a single observation.
-The genuine one dominates by orders of magnitude. When other image types show up
-at all, the report prints both counts rather than hiding the ambiguity.
+The whole 28-row table is printed, not a summary, and the decision rule is stated
+underneath. If *every* candidate accepts, the counter is not gated by the data
+type filter and the column proves nothing - the table says so rather than
+returning a confident wrong answer.
 
-That failure mode was observed: with the link up but noisy, `CSI_ERR1` reported
-`CECCDTERR = 0x2b` (corrected ECC on RAW10) while `CRCDTERR` and `IDDTERR` both
-said `0x2f` - one bit away from `0x2b`.
+This replaced a method that read the data type straight out of `CSI_ERR1` after
+narrowing the filter to a reserved type, so that every packet would name itself
+as an ID error. **That does not work.** `CSI_ERR1`'s data type field latches and
+is not re-armed by clearing the status flag in `CSI_FCR0`, so the polling loop
+read one stale value thousands of times and reported it as an overwhelming
+majority. The symptom was unmistakable in hindsight: every link at every bitrate,
+clean or marginal, named `0x2f` and nothing else - not even the frame delimiters,
+which are short packets and are not filtered by data type at all.
 
 **Geometry** - `CSI_LB0CFGR` fires a status flag when a nominated
-(line, byte) position is reached inside a frame. Whether a frame reaches line N
-is monotonic in N, so a binary search over 0..65535 finds the exact line count in
-16 steps, and the same over the byte counter with the line fixed to 1 gives the
-payload bytes per line. Width follows from bytes per line and the bits per pixel
-of the data type.
+(line, byte) position is reached inside a frame. If "reaches N" is monotonic in
+N, a binary search over 0..65535 finds the exact line count in 16 steps, and the
+same over the byte counter with the line fixed to 1 gives the payload bytes per
+line. Width follows from bytes per line and the bits per pixel of the data type.
+
+That monotonicity is an assumption, so it is **checked rather than trusted**.
+After each search the probe re-probes four points - 1, half, the result, and one
+past it - and prints them. A search converging on something that is not a
+geometry (a rate, a wrap-around, a threshold never reached) still returns a
+number that looks exactly like a measurement; the four points make it fail
+visibly. A result that fails its check is discarded rather than reported, because
+a plausible-looking wrong resolution is worse than none.
 
 **Interrupts are masked during every measurement.** At a mismatched bitrate the
 receiver raises one error per packet; with the HAL handler attached that is an
@@ -358,6 +371,14 @@ neighbouring profiles as noise. The first refine runs bore this out - 1600 Mbit/
 showed 13509 ECC errors in one pass and its neighbour 1550 showed none, which is
 not a plausible property of a D-PHY frequency band.
 
+**A number without its check is not a measurement.** Two of the probe's answers
+looked like measurements for three hardware runs and were not: the data type came
+from a latched register that was never re-armed, and the geometry came from a
+binary search whose monotonicity assumption was never tested. Both now print the
+evidence they rest on - the full candidate table, the four verification probes -
+and both discard a result that fails its own check. Where a summary and a raw
+table disagree about how much they claim, print the table.
+
 **Errors the probe caused itself are suppressed.** Stopping a virtual channel
 part way through a frame raises sync and SOT errors; those used to surface as
 `DCMIPP global error, ErrorCode=0x000c8900` the moment the CSI interrupt was
@@ -370,13 +391,18 @@ now clears the flags and the HAL error code after stopping.
 
 - The characterisation and preview stages have not been seen against a healthy
   link. Every number in the example report is illustrative.
-- **The geometry measurement is unvalidated and currently looks wrong.** On a
-  marginal link at 2500 Mbit/s it returned 1345 lines and 319 bytes per line,
-  where a 1920x1080 RAW10 frame should give 1080 and 2400. Either the byte
-  counter does not count within a line when the line counter is pinned to 1, or
-  the counter is not per-frame and the binary search is converging on a rate
-  rather than a geometry. It has not been re-run against a clean link, which is
-  the first thing to try before changing the method.
+- **The geometry measurement is still unvalidated.** Across clean links at 1550,
+  2000 and 2500 Mbit/s it returned 1345 lines and 319 bytes per line, where a
+  1920x1080 RAW10 frame should give 1080 and 2400. The reproducibility rules out
+  noise: 1345/319 is a real boundary of *something*. It was measured with a data
+  type that has since turned out to be bogus, so the first thing to do is repeat
+  it now that the type is identified properly - and read the monotonicity line
+  that the search now prints, which says whether the number means anything at
+  all.
+- The data type walk assumes the line/byte counter only counts packets the filter
+  accepted. If it turns out not to be gated that way, every candidate will show
+  `data yes` and the walk will say so; the rejection-count column is then the
+  only usable signal, and it has never been validated against a known source.
 - `refine` takes one sample per profile. Ranking two neighbouring profiles needs
   repeats, and each repeat costs a manual power-cycle.
 - The scan's own error reporting was noisy on the first run: `HAL_DCMIPP_CSI_SetConfig()`
