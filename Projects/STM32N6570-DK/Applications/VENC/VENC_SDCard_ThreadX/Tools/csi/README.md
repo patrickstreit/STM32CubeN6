@@ -7,39 +7,52 @@ questions about a CSI-2 source that the STM32 does not control:
 1. **Which CSI settings work?** Lane count, lane mapping, D-PHY bitrate, which
    virtual channels are present, what data type each carries, and the frame
    geometry.
-2. **Can VC0 and VC1 be shown side by side on the DK display?** The receiver
-   side is finished and proven; what is missing is a second channel. The two
-   tiles alternate rather than run at once, for a reason imposed by the silicon -
-   see [Why the two channels alternate](#why-the-two-channels-alternate).
+2. **Can VC0 and VC1 be shown side by side on the DK display?** Yes - both
+   channels arrive and `dual 0 1` shows them. The two tiles alternate rather
+   than run at once, for a reason imposed by the silicon - see [Why the two
+   channels alternate](#why-the-two-channels-alternate).
 
 Status, from several hardware sessions:
 
-- The link is **clean at 2500 Mbit/s per lane, 2 lanes, physical mapping**: no
-  ECC, CRC or D-PHY errors over 500 ms. 1250 Mbit/s locks as well but is
-  **marginal** - around 200 uncorrectable header ECC errors per 500 ms - and so
-  are 1200, 1450 and 1550. 2500 is therefore the known-good setting.
-- **VC0 carries 1920x1080 RAW10 (0x2b) at 48-50 fps.** Confirmed twice over: by
-  the line and byte counters, and by dumping the payload - `grab` returned
-  16-bit little-endian values in the 0..1023 range, 3840 bytes per line, which is
-  1920 pixels unpacked to 16-bit words.
-- **The channel carries two more kinds of packet besides the picture**: two lines
-  of embedded data (`0x12`, 320 bytes each, the 0x55/0x5a/0xa5 encoding sensors
-  use for register dumps) and 264 lines tagged `0x2f` RAW20 of 168 bytes that are
-  almost entirely zero. Neither is a second picture. What the source means by the
-  RAW20 lines is a question for the transmitter.
-- **VC1, VC2 and VC3 carry nothing.** `vcs` sees no frame start and no long
-  packet on them, and a full data type walk on VC1 rejects nothing either -
-  there are no packets to reject. The side-by-side goal is short of a second
-  source at the transmitter, not short of a way to find it.
+- **The transmitter runs at 1485 Mbit/s per lane**, 2 lanes, physical mapping,
+  and the link is **clean over 500 ms** - no ECC, CRC or D-PHY errors - with the
+  receiver set to either 1000 or 2500. **The setting barely matters**, and that
+  is not luck: `PHYBitrate` selects a receiver *band*, and `T_HS_SETTLE` is
+  specified almost entirely in absolute nanoseconds (85 ns + 6xUI to
+  145 ns + 10xUI), so the window is 91..155 ns at 1000 and 87..149 ns at 2500 -
+  practically the same window. Earlier sessions measured 2500 clean and 1250
+  marginal; that was a correct measurement of the transmitter *of the time*,
+  which really did run at 2500. It says nothing about this one. **The line rate
+  is set on the CrossLink side** - see the FPGA repo's README for the clock
+  chain and how to read it off an LED with a stopwatch.
+- **VC0 and VC1 each carry 1920x1080 RAW10 (0x2b) at 48 fps**, byte-identical
+  geometry: 1080 lines, 2400 bytes per line. VC0 was confirmed twice over: by the
+  line and byte counters, and by dumping the payload - `grab` returned 16-bit
+  little-endian values in the 0..1023 range, 3840 bytes per line, which is 1920
+  pixels unpacked to 16-bit words.
+- **The two channels are two sensors, not one stream duplicated.** They report
+  identical geometry, rate and data types, so nothing in the numbers would tell
+  them apart. Covering one lens does: one tile on the display goes dark and the
+  other does not.
+- **Each channel carries two more kinds of packet besides the picture**: two
+  lines of embedded data (`0x12`, 320 bytes each, the 0x55/0x5a/0xa5 encoding
+  sensors use for register dumps) and 264 lines tagged `0x2f` RAW20 of 168 bytes
+  that are almost entirely zero. Neither is a second picture. What the source
+  means by the RAW20 lines is a question for the transmitter.
+- **VC2 and VC3 carry nothing.** `vcs` sees no frame start and no long packet on
+  them. Only two of the CrossLink's RX channels are wired up.
 - The failure that produced no clock at any of 72 settings was **start order**,
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
 - The source takes **7 to 9 s** to start transmitting after its power is
   restored. Every wait for it is a timeout that ends on the clock, never a fixed
   delay - which is what makes a 5-minute window cost nothing when the operator is
   quick and still work when they are not.
-- **`dual` works, with one channel.** `dual 0 0` fills both tiles from VC0 at
-  153 against 152 frames, so the per-frame address swap is proven. Only the
-  virtual-channel half of the switch is still untested, for want of a VC1.
+- **`dual 0 1` works.** Both halves of the switch are now proven: `dual 0 0`
+  had shown the per-frame address swap at 153 against 152 frames, and the
+  virtual-channel half - the `P1FSCR.VC` write from the frame-complete ISR -
+  holds up now that there is a second channel to switch to. The hardware does
+  honour the shadow/current copy of the flow selection, so the fallback of
+  stopping and restarting the pipe around each switch was never needed.
 - `single 0` shows the picture on the display, downsized to 400x225. The Bayer
   pattern is **RGGB**, established by stepping through all four with `bayer` and
   looking at the screen - nothing in a CSI-2 stream states it. Colours land in
@@ -591,11 +604,6 @@ now clears the flags and the HAL error code after stopping.
 
 ## 7. Not done
 
-- **The virtual-channel half of `dual` is untested.** `dual 0 0` proves the
-  per-frame address swap - both tiles fill at the same rate - but with one
-  channel the `P1FSCR.VC` write has nothing to switch between. The moment a VC1
-  exists this is two commands: `vcs` to confirm it arrives, `dual 0 1` to show
-  it.
 - The **two DCMIPP errors at preview start** (`0x100` sync, then `0x900` sync
   plus data ID) are a real transient: the counters stay at two however long the
   preview runs. What is *not* a transient is the CSI data type error flag - see
@@ -649,15 +657,19 @@ power-cycled while it waits. Everything after that runs on a live link with no
 further cycles - `vcs`, `dt`, `geom`, `grab`, `bayer`, `errors` all work without
 touching the D-PHY.
 
-**The one blocker is not on this side.** The receiver is characterised, the
-preview runs at full rate, and the two-tile machinery is proven. VC0 and VC1 side
-by side needs the CrossLink to emit a second virtual channel. When it does, `vcs`
-confirms it in ten seconds and `dual 0 1` shows it.
+**The blocker was on the transmitter side, and it is gone.** For a long time VC1
+carried nothing, and this document said so - correctly. The cause was in the
+CrossLink: RX1's four data lanes had no pin locations and no `IO_TYPE=MIPI_DPHY`,
+so its soft D-PHY never received anything usable. With that fixed, `vcs` finds
+VC1 in ten seconds and `dual 0 1` shows both sensors.
 
 **What the encoder path inherited from this work**, both in
 `Appli/Core/Src/dcmipp_app.c`:
 
-- the D-PHY bitrate, 1250 -> 2500, because 1250 measured marginal here;
+- the D-PHY bitrate setting, 1250 -> 2500. Worth knowing that this is a
+  receiver band rather than a rate: the wire now carries 1485 Mbit/s per lane
+  and both 1000 and 2500 measure clean, so leaving it at 2500 is fine but is not
+  the tuned value it once looked like;
 - the Bayer pattern, RGGB, no longer inherited from the IMX335 but checked.
 
 It will also raise the CSI data type error flag permanently, for the reason in
