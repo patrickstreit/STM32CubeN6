@@ -7,11 +7,12 @@ questions about a CSI-2 source that the STM32 does not control:
 1. **Which CSI settings work?** Lane count, lane mapping, D-PHY bitrate, which
    virtual channels are present, what data type each carries, and the frame
    geometry.
-2. **Can VC0 and VC1 be shown side by side on the DK display?** Yes, with one
-   caveat imposed by the silicon - see [Why the two channels
-   alternate](#why-the-two-channels-alternate).
+2. **Can VC0 and VC1 be shown side by side on the DK display?** The receiver
+   side is finished and proven; what is missing is a second channel. The two
+   tiles alternate rather than run at once, for a reason imposed by the silicon -
+   see [Why the two channels alternate](#why-the-two-channels-alternate).
 
-Status, from three hardware sessions so far:
+Status, from several hardware sessions:
 
 - The link is **clean at 2500 Mbit/s per lane, 2 lanes, physical mapping**: no
   ECC, CRC or D-PHY errors over 500 ms. 1250 Mbit/s locks as well but is
@@ -32,8 +33,13 @@ Status, from three hardware sessions so far:
   source at the transmitter, not short of a way to find it.
 - The failure that produced no clock at any of 72 settings was **start order**,
   not bitrate; see [Start order](#5a-start-order-the-source-must-come-up-after-the-receiver).
-- The source takes **6 to 8 s** to start transmitting after a restart. Every
-  wait for it is a timeout that ends on the clock, never a fixed delay.
+- The source takes **7 to 9 s** to start transmitting after its power is
+  restored. Every wait for it is a timeout that ends on the clock, never a fixed
+  delay - which is what makes a 5-minute window cost nothing when the operator is
+  quick and still work when they are not.
+- **`dual` works, with one channel.** `dual 0 0` fills both tiles from VC0 at
+  153 against 152 frames, so the per-frame address swap is proven. Only the
+  virtual-channel half of the switch is still untested, for want of a VC1.
 - `single 0` shows the picture on the display, downsized to 400x225. The Bayer
   pattern is **RGGB**, established by stepping through all four with `bayer` and
   looking at the screen - nothing in a CSI-2 stream states it. Colours land in
@@ -114,12 +120,13 @@ Example of the report it prints:
 ```
 === CSI-2 probe result ===
 D-PHY : 2500 Mbit/s per lane, 2 lane(s), physical mapping
-VC0   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
-        other packets: 0x00(FRAME_START) 0x01(FRAME_END)
-VC1   : 30.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
-        other packets: 0x00(FRAME_START) 0x01(FRAME_END)
+Link  : clean over 500 ms, no ecc/crc/dphy errors
+VC0   : 48.0 fps, DT 0x2b RAW10, 1080 lines, 2400 bytes/line -> 1920x1080
+        2 other data type(s) also accepted: 0x12(EMBEDDED) 0x2f(RAW20)
 ==========================
 ```
+
+That is a real report from this source, not an illustration.
 
 ---
 
@@ -584,9 +591,11 @@ now clears the flags and the HAL error code after stopping.
 
 ## 7. Not done
 
-- `dual` has **never run**: only one channel has ever been found, so the
-  per-frame `P1FSCR.VC` switch described above is still an untested assumption.
-  `single 0` works - 1920x1080 RAW10 downsized to 400x225 on the display.
+- **The virtual-channel half of `dual` is untested.** `dual 0 0` proves the
+  per-frame address swap - both tiles fill at the same rate - but with one
+  channel the `P1FSCR.VC` write has nothing to switch between. The moment a VC1
+  exists this is two commands: `vcs` to confirm it arrives, `dual 0 1` to show
+  it.
 - The **two DCMIPP errors at preview start** (`0x100` sync, then `0x900` sync
   plus data ID) are a real transient: the counters stay at two however long the
   preview runs. What is *not* a transient is the CSI data type error flag - see
@@ -608,12 +617,64 @@ now clears the flags and the HAL error code after stopping.
   latches SOT/control flags while it drives the D-PHY through reset, which showed
   up as `PHY` on a random-looking subset of bitrates. There is now a settle delay
   and a flag clear after every apply, but that has not been re-measured.
+- **No exposure, white balance or colour matrix.** Colours are in the right
+  place and the picture is flat; see [Why the picture looks washed
+  out](#why-the-picture-looks-washed-out) for the three DCMIPP blocks that would
+  fix it without needing a sensor.
 - The byte counter is assumed to count within a line when the line counter is
-  fixed to 1. If `bytes/line` comes back implausible, that assumption is where to
-  look; the raw value is printed alongside the derived width for exactly that
-  reason.
+  fixed to 1. That assumption held everywhere it was checked - a middle line of
+  the frame is what the geometry search now measures - but it is still an
+  assumption, and the raw value is printed next to the derived width so an
+  implausible result is visible.
 - No TraceX instrumentation events were added. A one-shot scan report belongs on
   the console, and `Tools/instrumentation/instrumentation.yaml` is deliberately
   left untouched so an existing `.trx` still decodes against the current schema.
 - The greyscale-second-channel variant (PIPE2 with `PIPEDIFF = 1`) is described
   above but not implemented.
+
+---
+
+## 8. Picking this up again
+
+Three commands from a cold start, in `Projects/STM32N6570-DK/Applications/VENC/VENC_SDCard_ThreadX`:
+
+```powershell
+./Tools/debug/stm32n6-gdb.ps1 -Build -FlashAppli -Preset CsiProbe
+./Tools/debug/csi-console.ps1 -WaitFor "first frame after" -Sequence "link 280000"   # power-cycle the source
+./Tools/debug/csi-console.ps1 -Sequence "probe 2500; single 0"
+```
+
+The second one is the only one that needs a human: the source has to be
+power-cycled while it waits. Everything after that runs on a live link with no
+further cycles - `vcs`, `dt`, `geom`, `grab`, `bayer`, `errors` all work without
+touching the D-PHY.
+
+**The one blocker is not on this side.** The receiver is characterised, the
+preview runs at full rate, and the two-tile machinery is proven. VC0 and VC1 side
+by side needs the CrossLink to emit a second virtual channel. When it does, `vcs`
+confirms it in ten seconds and `dual 0 1` shows it.
+
+**What the encoder path inherited from this work**, both in
+`Appli/Core/Src/dcmipp_app.c`:
+
+- the D-PHY bitrate, 1250 -> 2500, because 1250 measured marginal here;
+- the Bayer pattern, RGGB, no longer inherited from the IMX335 but checked.
+
+It will also raise the CSI data type error flag permanently, for the reason in
+section 4. That is expected, not a fault.
+
+### Things that cost time to learn, so they are written down
+
+- **The FSBL is a RAM image** and the board boots into the ROM bootloader. GDB's
+  `load` is not a convenience, it is what starts the system. Flashing the
+  application alone leaves a board that says nothing.
+- **The gdb server resets the target on connect** unless it is given `-g`.
+  Attaching to a running board to read one register will reset it and cost a
+  power-cycle. `stm32n6-gdb.ps1` passes `-g` whenever it is not loading.
+- **The debugger cannot read PSRAM** at `0x90000000`. Trying it fails the detach
+  and kills the session; print from the firmware instead.
+- **The console drops characters** when a command arrives while it is printing -
+  one byte per `HAL_UART_Receive()`, no FIFO. `csi-console.ps1` paces characters
+  and retries a command when the board answers `unknown command`.
+- **Status flags are sticky and `CSI_ERR1` never re-arms.** A `status` read
+  reports the union of everything that ever happened. Use `errors` for a rate.

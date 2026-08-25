@@ -1,3 +1,6 @@
 build
 # Console transcripts written by Tools/debug/csi-console.ps1
 Tools/csi/last-session.log
+
+# Serial captures dropped in the project root by terminal programs
+COM*.txt
