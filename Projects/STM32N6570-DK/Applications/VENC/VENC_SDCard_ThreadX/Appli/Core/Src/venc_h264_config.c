@@ -106,8 +106,20 @@ uint8_t input_frame[NB_INPUT_FRAME][INPUT_FRAME_SIZE] ALIGN_32 INPUT_FRAME_LOCAT
 /* Encoder working pool */
 uint8_t ewl_pool[VENC_POOL_SIZE] ALIGN_32 VENC_BUFFER_LOCATION;
 
-/* h264 bitstream (encoded output buffer) */
-uint8_t h264_bitstream[VENC_OUTPUT_BUFFER_SIZE] ALIGN_32 __NON_CACHEABLE;
+/* h264 bitstream (encoded output buffer).
+
+   AXISRAM by default. It is the scarcest memory on the board and the composite
+   buffer wants to live there too, so PLAN.md asks whether PSRAM would do -
+   -DVENC_BITSTREAM_IN_PSRAM=ON answers that by measurement. PSRAM is uncached
+   in the MPU setup, same as the NOCACHE region, so neither placement needs
+   cache maintenance the other does not. */
+#if defined(VENC_BITSTREAM_IN_PSRAM)
+#define VENC_BITSTREAM_LOCATION IN_PSRAM
+#else
+#define VENC_BITSTREAM_LOCATION __NON_CACHEABLE
+#endif
+
+uint8_t h264_bitstream[VENC_OUTPUT_BUFFER_SIZE] ALIGN_32 VENC_BITSTREAM_LOCATION;
 
 
 /* CSI-2 input from external Lattice CrossLink (RAW10, VC0, 4 lanes) : 1920x1080 */

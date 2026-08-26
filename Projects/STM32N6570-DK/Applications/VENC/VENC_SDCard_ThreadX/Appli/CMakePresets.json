@@ -37,6 +37,20 @@
             "cacheVariables": {
                 "VENC_M2_AXISRAM_INPUT": "ON"
             }
+        },
+        {
+            "name": "DebugSmallRing",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_SMALL_BITSTREAM_RING": "ON"
+            }
+        },
+        {
+            "name": "DebugBitstreamPsram",
+            "inherits": "DebugSmallRing",
+            "cacheVariables": {
+                "VENC_BITSTREAM_IN_PSRAM": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -55,6 +69,14 @@
         {
             "name": "DebugAxiInput",
             "configurePreset": "DebugAxiInput"
+        },
+        {
+            "name": "DebugSmallRing",
+            "configurePreset": "DebugSmallRing"
+        },
+        {
+            "name": "DebugBitstreamPsram",
+            "configurePreset": "DebugBitstreamPsram"
         }
     ]
 }

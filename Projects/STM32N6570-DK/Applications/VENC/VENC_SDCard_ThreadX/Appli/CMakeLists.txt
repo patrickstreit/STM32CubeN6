@@ -75,6 +75,25 @@ if(VENC_M2_AXISRAM_INPUT)
     list(APPEND APP_Defines VENC_OUTPUT_BUFFER_SIZE=1000000U)
 endif()
 
+# AXISRAM is the scarce memory and the composite buffer wants to be there, so
+# the question is whether the bitstream ring can be evicted to PSRAM without
+# costing encode time. This option is how that gets measured (PLAN.md M2).
+option(VENC_BITSTREAM_IN_PSRAM "Put the h264 bitstream ring in PSRAM instead of AXISRAM" OFF)
+
+if(VENC_BITSTREAM_IN_PSRAM)
+    list(APPEND APP_Defines VENC_BITSTREAM_IN_PSRAM)
+endif()
+
+# Both arms of that comparison use the same ring size, so the only difference
+# between them is where the ring sits. 512 KB rather than the default 2 MB
+# because PSRAM has only ~770 KB free until the linker script is corrected to
+# the full 32 MB - and because the ring size is irrelevant to encode time.
+option(VENC_SMALL_BITSTREAM_RING "Shrink the bitstream ring to 512 KB" OFF)
+
+if(VENC_SMALL_BITSTREAM_RING)
+    list(APPEND APP_Defines VENC_OUTPUT_BUFFER_SIZE=524288U)
+endif()
+
 # --------------------------------------------------------------------------
 # Include paths
 # --------------------------------------------------------------------------

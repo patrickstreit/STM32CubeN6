@@ -88,10 +88,13 @@ strukturell, nicht implementierungsbedingt.
   `venc_rdy`, FUSE_ERROR, Errata ES0620 §2.2.14) → Frame-Mode.
 - Bildqualität: Encoder-Pfad hat weder BLC noch Gain noch CCM → „washed out"
   (siehe csi-README); die drei DCMIPP-Blöcke brauchen keinen Sensor.
-- Speicher: AXISRAM 3,4 MB (`.noncacheable` 2,77 MB, davon 2 MB
-  Bitstream-Ring), PSRAM 32 MB (**GCC-Linkerscript sieht fälschlich nur
-  16 MB**), EWL-Pool 8 MB PSRAM. Composite-NV12 448×1792 = 1,20 MB ×2
-  (Ping-Pong). Forum-Warnung: Ref-Frames in PSRAM → Timing-Artefakte.
+- Speicher: AXISRAM 3,4 MB (`.noncacheable` 2,77 MB), PSRAM 32 MB, davon im
+  Linkerscript nur **16 MB deklariert** und die zu 95 % belegt (`.psram_section`
+  15,99 MB von 16 MB) — der Ring passt nur mit 512 KB hinein, bis der Script auf
+  32 MB korrigiert ist. EWL-Pool 8 MB PSRAM. **Der Bitstream-Ring gehört nach
+  M2 nach PSRAM** (Platzierung kostet 0,1–0,5 %), damit die NOCACHE-Region den
+  Composite-NV12 448×1792 = 1,20 MB **im Ping-Pong (2×2,41 MB)** tragen kann.
+  Forum-Warnung: Ref-Frames in PSRAM → Timing-Artefakte.
 - SD-Pfad bereits ertüchtigt (Queue 30, 64-Sektor-Cache, gepaddete Writes);
   2×10 Mbit/s ≈ 2,5 MB/s unkritisch.
 
@@ -219,6 +222,34 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   Gain noch CCM (siehe Bildqualität oben), liefert also kontrastärmer als der
   Probe-Pfad. Der Sicherheitsabstand von 43 % trägt das, aber die Zahl ist
   szenenabhängig und nicht auf die dritte Stelle zu nehmen.
+  **Bitstream-Ring: PSRAM genügt.** Gemessen mit identischem Ring (512 KB) an
+  beiden Adressen, sonst gleicher Konfiguration, direkt hintereinander:
+
+  | Ring | 2 Mbit/s | 10 Mbit/s |
+  |---|---|---|
+  | AXISRAM (`.noncacheable`) | 7,10 µs/MB | 6,33 µs/MB |
+  | PSRAM | 7,11 µs/MB | 6,36 µs/MB |
+
+  Unterschied 0,1 % bzw. 0,5 % — innerhalb der Laufstreuung. Der Encoder
+  schreibt den Bitstream sequenziell und in kleinen Mengen (bei 10 Mbit/s rund
+  42 KB je Frame gegen 1,2 MB, die er als Quelle *liest*); das Lesen ist der
+  Flaschenhals, nicht das Schreiben. **Damit gehört der Ring nach PSRAM und
+  die NOCACHE-Region ganz dem Composite-Buffer** — was die Ping-Pong-Frage
+  erst lösbar macht. Presets `DebugSmallRing` / `DebugBitstreamPsram`.
+
+  **Speicherbudget der NOCACHE-Region (2769K = 2 835 456 B), Ring in PSRAM:**
+
+  | Belegung | Bedarf | passt |
+  |---|---|---|
+  | Composite NV12 448×1792, einfach | 1 204 224 B | ja, 1,55 MB frei |
+  | Composite NV12, **Ping-Pong (2×)** | 2 408 448 B | **ja**, 427 KB frei |
+  | Composite YUYV 448×1792, einfach | 1 605 632 B | ja, 1,17 MB frei |
+  | Composite YUYV, Ping-Pong (2×) | 3 211 264 B | **nein**, 376 KB zu viel |
+
+  Das entscheidet die Formatfrage: **NV12, weil nur damit Ping-Pong in AXISRAM
+  passt.** Als Zeitargument taugt das Format nicht (0,6 % Unterschied), als
+  Platzargument schon.
+
   **Finale Buffer-Platzierung:** Composite-Buffer nach AXISRAM. Er misst
   448·1792·1,5 = 1,20 MB und passt damit in die NOCACHE-Region (2,77 MB) neben
   einen verkleinerten Bitstream-Ring. Das ist keine Notwendigkeit mehr (PSRAM
