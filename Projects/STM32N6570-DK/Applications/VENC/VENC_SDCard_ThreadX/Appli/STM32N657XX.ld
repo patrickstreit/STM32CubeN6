@@ -68,7 +68,12 @@ MEMORY
   RO_Region (rx) 		: ORIGIN = 0x34000400, LENGTH = 500K
   RW_Region (rw) 		: ORIGIN = 0x3407D400, LENGTH = 570K
   NOCACHE_Region (rw) 	: ORIGIN = 0x3410BC00, LENGTH = 2769K
-  PSRAM    (rw)  		: ORIGIN = 0x90000000, LENGTH = 16M
+  /* APS256XX, 256 Mbit = 32 MB (APS256XX_RAM_SIZE in the component driver,
+     brought up by BSP_XSPI_RAM_Init() from Appli/Core/Src/main.c). The script
+     declared half of that, which left the region 95 % full and forced the
+     bitstream ring to stay in AXISRAM. Verified on the board before changing:
+     writes at +16 MB and at +32 MB-16 stick and do not alias onto 0x90000000. */
+  PSRAM    (rw)  		: ORIGIN = 0x90000000, LENGTH = 32M
 }
 
 /* Sections */

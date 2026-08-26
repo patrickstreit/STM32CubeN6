@@ -107,9 +107,14 @@ void sdcard_thread_func(ULONG arg)
     {
       ULONG frame_id = VENC_APP_GetFrameId();
       UINT write_status;
+      uint32_t write_start;
 
       INSTR_EVENT(INSTR_ID_FRAME_WRITE_BEGIN, frame_id, size, current_file, nb_frames);
+      write_start = venc_bench_now();
       write_status = VENC_FileX_write((CHAR*)data, (LONG)size);
+      /* Timed because the bitstream ring can live in AXISRAM or in PSRAM and
+         this is the side that reads it - see PLAN.md M2 on buffer placement. */
+      venc_bench_sd_sample(venc_bench_now() - write_start, (uint32_t)size);
       INSTR_EVENT(INSTR_ID_FRAME_WRITTEN, frame_id, size, write_status, current_file);
 
       monitor_bitrate("video", (uint32_t)size);

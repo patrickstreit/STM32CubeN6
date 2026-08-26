@@ -88,13 +88,17 @@ strukturell, nicht implementierungsbedingt.
   `venc_rdy`, FUSE_ERROR, Errata ES0620 §2.2.14) → Frame-Mode.
 - Bildqualität: Encoder-Pfad hat weder BLC noch Gain noch CCM → „washed out"
   (siehe csi-README); die drei DCMIPP-Blöcke brauchen keinen Sensor.
-- Speicher: AXISRAM 3,4 MB (`.noncacheable` 2,77 MB), PSRAM 32 MB, davon im
-  Linkerscript nur **16 MB deklariert** und die zu 95 % belegt (`.psram_section`
-  15,99 MB von 16 MB) — der Ring passt nur mit 512 KB hinein, bis der Script auf
-  32 MB korrigiert ist. EWL-Pool 8 MB PSRAM. **Der Bitstream-Ring gehört nach
-  M2 nach PSRAM** (Platzierung kostet 0,1–0,5 %), damit die NOCACHE-Region den
-  Composite-NV12 448×1792 = 1,20 MB **im Ping-Pong (2×2,41 MB)** tragen kann.
-  Forum-Warnung: Ref-Frames in PSRAM → Timing-Artefakte.
+- Speicher: AXISRAM 3,4 MB (`.noncacheable` 2,77 MB), PSRAM 32 MB —
+  **Linkerscript korrigiert** (deklarierte vorher 16 MB; die oberen 16 MB sind
+  am Board verifiziert, Schreibzugriffe bei +16 MB und +32 MB−16 bleiben stehen
+  und aliasen nicht auf 0x90000000). EWL-Pool 8 MB PSRAM.
+  **Aufteilung nach M2 endgültig:** Composite-NV12 448×1792 = 1,20 MB im
+  Ping-Pong (2,41 MB) *und* der Bitstream-Ring (427 KB) in AXISRAM, zusammen
+  exakt die 2,77 MB. Der Ring muss dorthin, weil der **SDMMC-DMA nicht aus
+  PSRAM lesen kann** (Transfers werden angenommen, aber ein Teil schliesst nie
+  ab → 10-s-Timeout im FileX-Treiber); die Encode-Zeit hätte ihn erlaubt.
+  Forum-Warnung: Ref-Frames in PSRAM → Timing-Artefakte — für einen Umzug ist
+  jetzt kein AXISRAM mehr übrig.
 - SD-Pfad bereits ertüchtigt (Queue 30, 64-Sektor-Cache, gepaddete Writes);
   2×10 Mbit/s ≈ 2,5 MB/s unkritisch.
 
@@ -237,7 +241,35 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   die NOCACHE-Region ganz dem Composite-Buffer** — was die Ping-Pong-Frage
   erst lösbar macht. Presets `DebugSmallRing` / `DebugBitstreamPsram`.
 
-  **Speicherbudget der NOCACHE-Region (2769K = 2 835 456 B), Ring in PSRAM:**
+  **…aber der Ring darf trotzdem nicht nach PSRAM — die SD-Karte verbietet es.**
+  Der Encode-Zeit-Vergleich oben misst nur, wer den Ring *schreibt*. Wer ihn
+  *liest*, ist der SDMMC-DMA, und der kommt mit der XSPI-gemappten PSRAM nicht
+  zurecht. Gemessen mit `sdbench 200`, identischer 512-KB-Ring an beiden
+  Adressen:
+
+  | Ring | 2 Mbit/s | 10 Mbit/s | Blocktransfers |
+  |---|---|---|---|
+  | AXISRAM | 3,2 ms avg / 30,4 ms max | 5,5 ms avg / 31,5 ms max | 278/278 und 299/299 abgeschlossen |
+  | PSRAM | **213 ms avg / 4,63 s max** | **23,2 ms avg / 626 ms max** | **88 von 91 abgeschlossen** |
+
+  Die Zähler sagen, was passiert: `blk.rejected=0` — die HAL nimmt jeden
+  Auftrag an — aber `blk.calls=91` gegen `blk.completions=88`. Drei Transfers
+  melden nie Fertigstellung, der FileX-Treiber läuft in sein
+  `FX_STM32_SD_DEFAULT_TIMEOUT` (10 s), und das erzeugt die
+  Sekunden-Ausreisser bei einem Minimum von 431 µs. Im AXISRAM-Arm kommt jeder
+  einzelne Transfer an, und `blk.from_psram=0`.
+  FileX übergibt den Nutzpuffer teilweise direkt an den Treiber
+  (`blk.from_psram=65` von 91) und teilweise seinen eigenen Medienpuffer
+  (`from_axisram=26`) — nur die direkten Transfers aus PSRAM hängen.
+  **Damit ist die Ringplatzierung entschieden und zwar nicht von der
+  Encode-Zeit:** der Bitstream-Ring bleibt in AXISRAM, weil der SD-Pfad nicht
+  aus PSRAM heraus DMA-en kann.
+  *Ausweg, falls der Platz später doch gebraucht wird:* FileX zwingen, immer
+  über seinen Medienpuffer zu gehen. Das kostet eine Kopie von ~50 KB je Frame
+  aus PSRAM (bei den gemessenen 9,4 MB/s rund 5 ms) und gibt 1,6 MB frei. Nicht
+  umgesetzt, nur notiert.
+
+  **Speicherbudget der NOCACHE-Region (2769K = 2 835 456 B):**
 
   | Belegung | Bedarf | passt |
   |---|---|---|
@@ -249,6 +281,15 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   Das entscheidet die Formatfrage: **NV12, weil nur damit Ping-Pong in AXISRAM
   passt.** Als Zeitargument taugt das Format nicht (0,6 % Unterschied), als
   Platzargument schon.
+
+  **Die 427 KB, die dabei frei bleiben, sind genau der Bitstream-Ring** — und
+  der muss dort liegen, siehe oben. Bei 10 Mbit/s und 24,8 fps sind das rund
+  50 KB je Frame, der Ring fasst mit `VENC_OUTPUT_BLOCK_NBR = 4` also vier
+  Frames Polster gegen einen SD-Stall. Der längste gemessene Schreibvorgang ist
+  31,5 ms, knapp eine Frameperiode — das Polster reicht mit Reserve. Die
+  NOCACHE-Region geht damit **exakt auf**: 2 408 448 + 427 008 = 2 835 456 B.
+  Kein Platz mehr für den EWL-Ref-Frame-Umzug, der in Phase 1 als Option steht;
+  der bleibt in PSRAM.
 
   **Finale Buffer-Platzierung:** Composite-Buffer nach AXISRAM. Er misst
   448·1792·1,5 = 1,20 MB und passt damit in die NOCACHE-Region (2,77 MB) neben
@@ -438,10 +479,14 @@ parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste ändert).
   anpassen, `gopLen` ≈ Framerate; Coding nach M2: `enableCabac` und
   `transform8x8Mode` bleiben auf den Defaults (1 / 1) — M2 hat gezeigt, dass
   beide die Zeit nicht messbar bewegen, also entscheidet die Qualität.
-- [ ] Buffer-Layout nach M2: **Composite-Buffer nach AXISRAM** (1,20 MB, spart
-  7,5 ms je Frame, siehe M2 (b)) — die DCMIPP schreibt direkt dorthin, keine
-  CPU-Kopie; EWL-Ref-Frames nach Bedarf; Bitstream-Ring auf 1–1,5 MB;
-  EWL-Pool 8 → ~4 MB; Linkerscript-Fix PSRAM 16→32 MB (`STM32N657XX.ld`).
+- [ ] Buffer-Layout nach M2, die NOCACHE-Region geht exakt auf:
+  **Composite-NV12 im Ping-Pong (2×1,20 MB = 2 408 448 B)** — die DCMIPP
+  schreibt direkt dorthin, keine CPU-Kopie — **plus Bitstream-Ring
+  (427 008 B)**, der dort bleiben *muss*, weil der SDMMC-DMA nicht aus PSRAM
+  liest. `VENC_OUTPUT_BUFFER_SIZE` entsprechend setzen, `VENC_OUTPUT_BLOCK_NBR`
+  bei 4 lassen (≈106 KB je Block gegen ~50 KB je Frame). EWL-Ref-Frames und
+  EWL-Pool bleiben in PSRAM — dort ist nach dem Linkerscript-Fix Platz, in
+  AXISRAM nicht mehr. Linkerscript-Fix PSRAM 16→32 MB: **erledigt**.
 - [ ] Verifikation: Encode-Zeit-Trace; `H264ENC_FUSE_ERROR`-frei ≥10 min;
   ffprobe/ffplay: 448×1792, Ziel-fps, ~10 Mbit/s.
 

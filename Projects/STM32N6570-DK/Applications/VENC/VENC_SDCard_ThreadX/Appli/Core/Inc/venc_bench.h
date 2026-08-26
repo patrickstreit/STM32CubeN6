@@ -77,6 +77,31 @@ bool venc_bench_discard(void);
 /** @brief Throw encoded output away, so the SD path cannot stall a measurement. */
 void venc_bench_set_discard(bool discard);
 
+/**
+  * @brief  Start a fresh SD write measurement.
+  *
+  * Separate from the encode-time model on purpose: that one runs with the
+  * output discarded, so nothing reaches the card while it is measuring.
+  */
+void venc_bench_sd_reset(void);
+
+/**
+  * @brief  Record one FileX write.
+  * @param  cycles  duration of the write call
+  * @param  bytes   payload handed to FileX
+  */
+void venc_bench_sd_sample(uint32_t cycles, uint32_t bytes);
+
+/**
+  * @brief  Writes recorded since the last reset.
+  */
+uint32_t venc_bench_sd_writes(void);
+
+/**
+  * @brief  Print the SD write report as key=value lines.
+  */
+void venc_bench_sd_report(void);
+
 /* ------------------------------------------------------------------------- */
 /* Variants under test                                                       */
 /*                                                                           */

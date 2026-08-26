@@ -198,6 +198,16 @@ static const char *input_src_name(void)
   return (g_input_src == VENC_INPUT_FROM_AXISRAM) ? "axisram" : "capture-psram";
 }
 
+/** @brief Where the bitstream ring the SD writer reads from was linked. */
+static const char *bitstream_location_name(void)
+{
+#if defined(VENC_BITSTREAM_IN_PSRAM)
+  return "psram";
+#else
+  return "axisram";
+#endif
+}
+
 /** @brief Print min/avg/max of a cycle statistic in whole microseconds. */
 static void stat_print(const char *prefix, const stat_t *s)
 {
@@ -209,6 +219,80 @@ static void stat_print(const char *prefix, const stat_t *s)
   printf("%s.us_min=%lu\n", prefix, (unsigned long)cyc_to_us(s->min));
   printf("%s.us_avg=%lu\n", prefix, (unsigned long)cyc_to_us(stat_avg(s)));
   printf("%s.us_max=%lu\n", prefix, (unsigned long)cyc_to_us(s->max));
+}
+
+/* Counted in the FileX SD glue: which memory the SDMMC was pointed at, and
+   whether it accepted and completed the transfer. */
+extern volatile uint32_t sd_write_calls;
+extern volatile uint32_t sd_write_from_axisram;
+extern volatile uint32_t sd_write_from_psram;
+extern volatile uint32_t sd_write_rejected;
+extern volatile uint32_t sd_write_completions;
+
+static stat_t   g_sd_write;
+static uint64_t g_sd_bytes;
+static uint32_t g_sd_started_ms;
+
+void venc_bench_sd_reset(void)
+{
+  cycle_counter_init();
+  stat_reset(&g_sd_write);
+  g_sd_bytes      = 0U;
+  g_sd_started_ms = HAL_GetTick();
+
+  sd_write_calls        = 0U;
+  sd_write_from_axisram = 0U;
+  sd_write_from_psram   = 0U;
+  sd_write_rejected     = 0U;
+  sd_write_completions  = 0U;
+}
+
+void venc_bench_sd_sample(uint32_t cycles, uint32_t bytes)
+{
+  stat_add(&g_sd_write, cycles);
+  g_sd_bytes += (uint64_t)bytes;
+}
+
+uint32_t venc_bench_sd_writes(void)
+{
+  return g_sd_write.n;
+}
+
+void venc_bench_sd_report(void)
+{
+  uint32_t elapsed = HAL_GetTick() - g_sd_started_ms;
+  /* stat_avg() is in cycles - everything else here is microseconds. */
+  uint32_t avg_us  = (g_sd_write.n == 0U) ? 0U : cyc_to_us(stat_avg(&g_sd_write));
+
+  printf("=== SD RESULT ===\n");
+  printf("cpu_hz=%lu\n", (unsigned long)HAL_RCC_GetCpuClockFreq());
+  printf("bitstream_src=%s\n", bitstream_location_name());
+  printf("blk.calls=%lu\n", (unsigned long)sd_write_calls);
+  printf("blk.from_axisram=%lu\n", (unsigned long)sd_write_from_axisram);
+  printf("blk.from_psram=%lu\n", (unsigned long)sd_write_from_psram);
+  printf("blk.rejected=%lu\n", (unsigned long)sd_write_rejected);
+  printf("blk.completions=%lu\n", (unsigned long)sd_write_completions);
+  printf("bitrate=%lu\n", (unsigned long)hVencH264Instance.cfgH264Rate.bitPerSecond);
+  printf("window_ms=%lu\n", (unsigned long)elapsed);
+  stat_print("write", &g_sd_write);
+  printf("writes=%lu\n", (unsigned long)g_sd_write.n);
+  printf("kbytes=%lu\n", (unsigned long)(g_sd_bytes / 1024U));
+  if (g_sd_write.n != 0U)
+  {
+    printf("bytes_per_write=%lu\n",
+           (unsigned long)(g_sd_bytes / (uint64_t)g_sd_write.n));
+  }
+  /* Throughput of the write calls themselves, not of the recording: it ignores
+     the time the writer spends waiting for frames, which is what makes it
+     comparable between two buffer placements. */
+  if (avg_us != 0U)
+  {
+    uint32_t bytes_per_write = (uint32_t)(g_sd_bytes / (uint64_t)g_sd_write.n);
+    printf("write_kbyte_per_s=%lu\n",
+           (unsigned long)(((uint64_t)bytes_per_write * 1000000U) /
+                           ((uint64_t)avg_us * 1024U)));
+  }
+  printf("=== END ===\n");
 }
 
 void venc_bench_report(const char *label)

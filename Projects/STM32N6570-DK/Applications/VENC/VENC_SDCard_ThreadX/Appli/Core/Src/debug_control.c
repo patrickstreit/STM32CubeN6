@@ -135,6 +135,82 @@ static void run_bench(uint32_t frames)
   }
 }
 
+/**
+  * @brief  Record @p writes frames to the card and print the write time model.
+  *
+  * The mirror image of run_bench(): that one throws the output away so the card
+  * cannot influence the encode time, this one keeps it so the card is exactly
+  * what gets measured.
+  */
+static void run_sdbench(uint32_t writes)
+{
+  VENC_APP_Status_t status;
+  bool     was_discarding = venc_bench_discard();
+  bool     we_started_it  = false;
+  uint32_t waited_s = 0U;
+  uint32_t deadline_s = ((writes / 10U) * 2U) + 15U;
+
+  venc_bench_set_discard(false);
+  venc_bench_sd_reset();
+
+  VENC_APP_GetStatus(&status);
+  if (status.state != VENC_APP_PIPELINE_RUNNING)
+  {
+    if (VENC_APP_EncodingStart() != TX_SUCCESS)
+    {
+      printf("CTRL: the pipeline would not start\n");
+      venc_bench_set_discard(was_discarding);
+      return;
+    }
+    while ((waited_s < 10U) && (status.state != VENC_APP_PIPELINE_RUNNING))
+    {
+      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
+      waited_s++;
+      VENC_APP_GetStatus(&status);
+    }
+    if (status.state != VENC_APP_PIPELINE_RUNNING)
+    {
+      printf("CTRL: the pipeline is %s, not running - nothing to write\n",
+             VENC_APP_PipelineStateName(status.state));
+      venc_bench_set_discard(was_discarding);
+      return;
+    }
+    waited_s = 0U;
+    we_started_it = true;
+    venc_bench_sd_reset();
+  }
+
+  while ((venc_bench_sd_writes() < writes) && (waited_s < deadline_s))
+  {
+    tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
+    waited_s++;
+    printf(".");
+
+    VENC_APP_GetStatus(&status);
+    if (status.state != VENC_APP_PIPELINE_RUNNING)
+    {
+      printf("\nCTRL: the pipeline stopped during the measurement\n");
+      break;
+    }
+  }
+  printf("\n");
+
+  if (venc_bench_sd_writes() < writes)
+  {
+    printf("CTRL: only %lu of %lu writes happened; reporting what there is\n",
+           (unsigned long)venc_bench_sd_writes(), (unsigned long)writes);
+  }
+
+  venc_bench_sd_report();
+  venc_bench_set_discard(was_discarding);
+
+  if (we_started_it)
+  {
+    (void)VENC_APP_EncodingStop();
+    printf("CTRL: pipeline stopped again (it was 'sdbench' that started it)\n");
+  }
+}
+
 static void handle_command(char *line)
 {
   if ((strcmp(line, "help") == 0) || (strcmp(line, "?") == 0))
@@ -147,6 +223,8 @@ static void handle_command(char *line)
            "  bench [n]           encode-time model over n frames (default 200);\n"
            "                      starts the pipeline if it is stopped and drops\n"
            "                      the encoded output for the duration\n"
+           "  sdbench [n]         SD write time over n frames (default 200);\n"
+           "                      records to the card, unlike 'bench'\n"
            "  record              keep encoded frames again\n"
            "  format yuyv|nv12    pixel packer and encoder input format\n"
            "  inbuf capture|axisram  where the encoder reads the picture from\n"
@@ -186,6 +264,10 @@ static void handle_command(char *line)
   else if (strcmp(line, "cfg") == 0)
   {
     venc_bench_print_config();
+  }
+  else if (strncmp(line, "sdbench", 7) == 0)
+  {
+    run_sdbench(arg_u32(line, 0U, 200U));
   }
   else if (strncmp(line, "bench", 5) == 0)
   {

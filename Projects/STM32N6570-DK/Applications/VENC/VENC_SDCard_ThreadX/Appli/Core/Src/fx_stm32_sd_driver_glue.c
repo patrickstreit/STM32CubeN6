@@ -19,6 +19,17 @@ TX_SEMAPHORE sd_rx_semaphore;
 static volatile UINT sd_last_write_start_block = 0;
 static volatile UINT sd_last_write_block_count = 0;
 
+/* Where the blocks the SDMMC is asked to transfer actually live, and whether it
+   accepted them. The bitstream ring can be linked into AXISRAM or into PSRAM
+   and the two behave very differently at the card (PLAN.md M2), so counting
+   this is what separates "the IDMA refuses the address" from "the transfer is
+   merely slow". Plain counters, read from the console. */
+volatile uint32_t sd_write_calls;
+volatile uint32_t sd_write_from_axisram;
+volatile uint32_t sd_write_from_psram;
+volatile uint32_t sd_write_rejected;
+volatile uint32_t sd_write_completions;
+
 SD_HandleTypeDef hsd1;
 
 
@@ -161,7 +172,21 @@ INT fx_stm32_sd_write_blocks(UINT instance, UINT *buffer, UINT start_block, UINT
   sd_last_write_start_block = start_block;
   sd_last_write_block_count = total_blocks;
 
+  sd_write_calls++;
+  if (((uintptr_t)buffer & 0xFF000000U) == 0x90000000U)
+  {
+    sd_write_from_psram++;
+  }
+  else if (((uintptr_t)buffer & 0xFF000000U) == 0x34000000U)
+  {
+    sd_write_from_axisram++;
+  }
+
   status = HAL_SD_WriteBlocks_DMA(&hsd1, (uint8_t *)buffer, start_block, total_blocks);
+  if (status != HAL_OK)
+  {
+    sd_write_rejected++;
+  }
   INSTR_EVENT(INSTR_ID_SD_WRITE_BLOCKS,
               start_block,
               total_blocks,
@@ -197,6 +222,7 @@ void HAL_SD_TxCpltCallback(SD_HandleTypeDef *hsd)
               (ULONG)(hsd->ErrorCode),
               0);
 
+  sd_write_completions++;
   tx_semaphore_put(&sd_tx_semaphore);
 
   /* USER CODE BEGIN POST_TX_CMPLT */
