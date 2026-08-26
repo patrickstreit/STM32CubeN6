@@ -68,15 +68,16 @@ strukturell, nicht implementierungsbedingt.
   Memory-Bandbreite als Bottleneck; „VENC liest Chroma doppelt → ø 16 bpp
   Input-Traffic".
 - Encode-Zeit-Hebel — **von M2 auf zwei zusammengeschrumpft**: Auflösung
-  (448×1792 = 3136 MBs → gemessen 22,7 ms bei 7,2 µs/MB) und **Input-Buffer
-  AXISRAM statt uncached PSRAM (−31 %)**. NV12 statt YUYV, `enableCabac=2`
-  (offiziell „Performance optimized": Intra CAVLC / Inter CABAC) und
-  `transform8x8Mode=0` liegen alle im Rauschen — die Recherche-Erwartung, hier
-  Zeit zu holen, hat die Messung nicht bestätigt. Ebenso widerlegt: „höhere
-  Bitrate macht Encoding nicht schneller" — 10 Mbit/s ist 11 % *schneller* als
-  2 Mbit/s, weil die Ratenregelung weniger zu tun hat. 10 Mbit/s ist also nicht
-  nur unkritisch (API bis 40 Mbit/s, Level 4.1 reicht), sondern der günstigere
-  Betriebspunkt.
+  (448×1792 = 3136 MBs → gemessen 20,8 ms bei 6,6 µs/MB am Zielbetriebspunkt)
+  und **Input-Buffer AXISRAM statt uncached PSRAM (−31 %, auf beiden gemessenen
+  Szenen)**. NV12 statt YUYV, `enableCabac=2` (offiziell „Performance
+  optimized": Intra CAVLC / Inter CABAC) und `transform8x8Mode=0` liegen alle
+  im Rauschen — auf der bewegten Szene innerhalb von 0,6 %. Die
+  Recherche-Erwartung, hier Zeit zu holen, hat die Messung nicht bestätigt.
+  Ebenso widerlegt: „höhere Bitrate macht Encoding nicht schneller" — 10 Mbit/s
+  ist schneller als 2 Mbit/s, statisch um 11 %, auf bewegtem Bild noch um 3 %.
+  10 Mbit/s ist also nicht nur unkritisch (API bis 40 Mbit/s, Level 4.1 reicht),
+  sondern der günstigere Betriebspunkt.
 - Budget: 448×1792@25 ≈ 59 % VENC-Auslastung → Luft bis ~30 fps Composite. Nach
   M1 liegt die Composite-Rate bei 24,8 fps (ein Composite = je ein Segment pro
   Kanal), also im günstigen Ast dieser Rechnung.
@@ -157,34 +158,67 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   Gemessen wird ausschliesslich `H264EncStrmEncode()` auf Live-Kamerabildern
   (ein Standbild machte Inter-Frames unrealistisch billig), Ausgabe wird
   verworfen, damit die SD-Karte nicht mitmisst.
-  **Ergebnis (720p = 3600 MB, je 200 Frames in zwei Durchläufen; (b) 60
-  Frames, weil die Stage-Kopie den Lauf auf 5,5 fps drückt):**
+  Gemessen auf **zwei Szenen**: erst statisch (Raum, unbewegt), dann mit einem
+  Bildschirm mit Bewegtbild vor der Kamera. Die erste Serie allein wäre
+  irreführend gewesen — auf einem unbewegten Bild sind Inter-Frames billig, und
+  die Zahlen sind dort eine Untergrenze.
+  **Ergebnis (720p = 3600 MB, µs/MB; statisch je 200 Frames in zwei
+  Durchläufen, bewegt 200 Frames; (b) 60 Frames, weil die Stage-Kopie den Lauf
+  auf 5,5 fps drückt):**
 
-  | Variante | µs/MB (P1 / P2) | ms/Frame | 448×1792 | max. Composite-Rate |
+  | Variante | statisch (P1 / P2) | bewegt | 448×1792 bewegt | max. Composite-Rate |
   |---|---|---|---|---|
-  | Baseline YUYV, cabac=1, t8x8=1, 2 Mbit/s | 7,24 / 7,19 | 26,1 / 25,9 | 22,7 ms | 44,0 fps |
-  | (a) NV12 | (7,59) / 7,07 | 25,5 | 22,2 ms | 45,1 fps |
-  | (c) `enableCabac=2` | 7,24 / 7,20 | 26,1 / 26,0 | 22,6 ms | 44,3 fps |
-  | (d) `transform8x8Mode=0` | 7,31 / 7,30 | 26,4 / 26,3 | 22,9 ms | 43,7 fps |
-  | (e) 10 Mbit/s | 6,45 / 6,42 | 23,2 / 23,1 | 20,1 ms | 49,7 fps |
-  | (b) NV12 aus AXISRAM | **4,83** | **17,4** | **15,1 ms** | **66,0 fps** |
+  | Baseline YUYV, cabac=1, t8x8=1, 2 Mbit/s | 7,24 / 7,19 | 6,85 | 21,5 ms | 46,6 fps |
+  | (a) NV12 | (7,59) / 7,07 | 6,83 | 21,4 ms | 46,7 fps |
+  | (c) `enableCabac=2` | 7,24 / 7,20 | 6,87 | 21,5 ms | 46,4 fps |
+  | (d) `transform8x8Mode=0` | 7,31 / 7,30 | 6,86 | 21,5 ms | 46,5 fps |
+  | **(e) 10 Mbit/s — der Zielbetriebspunkt** | 6,45 / 6,42 | **6,64** | **20,8 ms** | **48,0 fps** |
+  | (b) NV12 aus PSRAM (Kontrolle) | 6,99 | 6,76 | 21,2 ms | 47,2 fps |
+  | (b) NV12 aus AXISRAM | **4,83** | **4,62** | **14,5 ms** | **69,0 fps** |
 
-  Der P1-Wert von (a) ist eingeklammert: in diesem Lauf steckt ein einzelner
-  150-ms-Ausreisser (SD-Nachlauf), P2 ist der saubere. Streuung derselben
-  Konfiguration zwischen Läufen ≈ 1 %; (a), (c) und (d) liegen damit alle im
-  Rauschen der Baseline — **Format, Entropiecoder und 8×8-Transform kosten
-  praktisch nichts**. Nur zwei Dinge bewegen die Zeit wirklich:
+  Der statische P1-Wert von (a) ist eingeklammert: in diesem Lauf steckt ein
+  einzelner 150-ms-Ausreisser (SD-Nachlauf), P2 ist der saubere.
+
+  **Die bewegte Szene wirkt in beide Richtungen — das ist kein Widerspruch,
+  sondern die Ratenregelung.** Bei 2 Mbit/s wird das Encoding *schneller*
+  (7,2 → 6,85): eine schwerere Szene bekommt bei festem Bitbudget einen höheren
+  QP, und ein höherer QP heisst weniger Koeffizienten. Bei 10 Mbit/s, wo das
+  Budget grosszügig ist und der QP niedrig bleibt, wird es *langsamer*
+  (6,42 → 6,64, +3,4 %). Nur der zweite Wert misst die Szene; der erste misst
+  die Regelung.
+  **Merke für jede weitere Messung:** Bits/Frame taugen hier nicht als
+  Schwierigkeitsmass. Die Regelung trifft ihr Budget punktgenau — 10 Mbit/s ÷
+  30 fps = 333 kbit/Frame, gemessen 334 — und zwar unabhängig davon, was vor
+  der Kamera passiert, bis hin zur zugehaltenen Linse.
+
+  Auf der bewegten Szene liegen Baseline, (a), (c) und (d) innerhalb von 0,6 %
+  (6,83–6,87) — enger als auf der statischen. **Format, Entropiecoder und
+  8×8-Transform kosten praktisch nichts**, und das gilt jetzt auch dort, wo es
+  überhaupt Residuum zu codieren gibt. Nur zwei Dinge bewegen die Zeit
+  wirklich:
   1. **Woher der Encoder das Bild liest.** Aus AXISRAM statt PSRAM sind es
-     31 % weniger Encode-Zeit (25,2 → 17,4 ms). Der Encoder ist beim Lesen der
-     Quelle speicherlimitiert, nicht rechenlimitiert.
-  2. **Die Bitrate — mit umgekehrtem Vorzeichen als erwartet.** 10 Mbit/s ist
-     11 % *schneller* als 2 Mbit/s (23,1 vs. 25,9 ms): bei 2 Mbit/s arbeitet die
-     Ratenregelung härter, bei 10 Mbit/s läuft sie fast im Leerlauf.
+     31 % weniger Encode-Zeit — statisch 6,99 → 4,83, bewegt 6,76 → 4,62 µs/MB,
+     also −30,9 % bzw. −31,7 %. Der Effekt hängt nicht am Bildinhalt, was ihn
+     erwarten liess: der Encoder ist beim Lesen der Quelle speicherlimitiert,
+     nicht rechenlimitiert.
+  2. **Die Bitrate — auf der statischen Szene mit umgekehrtem Vorzeichen als
+     erwartet.** Statisch ist 10 Mbit/s 11 % *schneller* als 2 Mbit/s. Auf der
+     bewegten Szene schrumpft der Vorsprung auf 3 % (6,64 vs. 6,85), weil dort
+     beide Effekte gegeneinander laufen. In keinem Fall ist die hohe Bitrate
+     teurer — die Recherche-Erwartung „höhere Bitrate kostet Zeit" ist damit
+     auf beiden Szenen widerlegt.
 
   **Antwort auf die Planfrage:** 448×1792 passt bei 24,8 fps mit grossem
-  Abstand. Budget 40,3 ms/Frame, teuerste gemessene Variante 22,9 ms → **57 %
-  Auslastung**. Selbst 30 fps (33,3 ms) und 44 fps wären mit dem Baseline-Setup
-  drin; der Engpass bleibt die Capture-Seite aus M0/M1, nicht der Encoder.
+  Abstand. Budget 40,3 ms/Frame; am Zielbetriebspunkt (10 Mbit/s, bewegte
+  Szene) sind es 20,8 ms → **52 % Auslastung**, über alle gemessenen Varianten
+  und beide Szenen nie mehr als 22,9 ms → 57 %. Selbst 30 fps (33,3 ms) und
+  44 fps wären drin; der Engpass bleibt die Capture-Seite aus M0/M1, nicht der
+  Encoder.
+  **Vorbehalt:** beide Szenen sind Bench-Szenen, keine Einsatzszenen. Ein
+  detailreicheres Bild kostet mehr, und der Encoder-Pfad hat weder BLC noch
+  Gain noch CCM (siehe Bildqualität oben), liefert also kontrastärmer als der
+  Probe-Pfad. Der Sicherheitsabstand von 43 % trägt das, aber die Zahl ist
+  szenenabhängig und nicht auf die dritte Stelle zu nehmen.
   **Finale Buffer-Platzierung:** Composite-Buffer nach AXISRAM. Er misst
   448·1792·1,5 = 1,20 MB und passt damit in die NOCACHE-Region (2,77 MB) neben
   einen verkleinerten Bitstream-Ring. Das ist keine Notwendigkeit mehr (PSRAM
@@ -270,7 +304,7 @@ ISR-Latenzen stehen als min/avg/max im Konsolen-Report, dafür braucht es kein
 Perfetto; neue Instr-IDs wären erst nützlich, wenn Capture und Encoder im selben
 Trace korreliert werden müssen (M2/Phase 2).
 
-### Rohdaten M2 (2026-08-26, Encoder-Build)
+### Rohdaten M2 (2026-08-26/27, Encoder-Build)
 
 Der Encoder-Build kann alle M2-Varianten zur Laufzeit umstellen, ausser (b):
 die Stage-Puffer in AXISRAM gibt es nur im Preset `DebugAxiInput`
@@ -306,7 +340,9 @@ composite_mbs=3136      composite_us=15146       composite_max_fps_x100=6602
 Zum Vergleich derselbe Lauf mit `inbuf capture`: `all.us_avg=25166`,
 `all.us_per_mb_x100=699`, `composite_max_fps_x100=4562`. Ein zweiter Durchlauf
 reproduziert beide Seiten auf drei Stellen (25171 / 17396 µs, Stage-Kopie
-146551 µs). Gleiche Bits je Frame
+146551 µs), und auf der bewegten Szene bleibt der Abstand gleich (24370 →
+16640 µs, −31,7 %) bei unveränderter Stage-Kopie (146529 µs — sie ist ein
+reiner memcpy und hängt nicht am Bildinhalt). Gleiche Bits je Frame
 (8,1 vs. 8,5 KB), also ein fairer Vergleich; und weil zwischen zwei Frames im
 AXISRAM-Lauf 164 ms statt 26 ms liegen, ist die Szene dort *stärker* verändert
 — der 31-%-Vorteil ist eher konservativ als geschönt.
@@ -314,6 +350,21 @@ AXISRAM-Lauf 164 ms statt 26 ms liegen, ist die Szene dort *stärker* verändert
 `stream_kbit_per_s` ist im (b)-Lauf niedrig (384), weil das Fenster die
 Stage-Kopien enthält; die Ratenregelung ist auf 30 fps konfiguriert, real kamen
 5,5 fps an. Für das Zeitmodell irrelevant, `us_per_mb` misst nur den Encode.
+
+**Die bewegte Szene** war ein Bildschirm mit laufendem Video vor der Kamera.
+Das ist der brauchbarere Aufbau: er bewegt sich gleichmässig und von selbst,
+also kann die ganze Matrix am Stück laufen, ohne dass jemand daneben stehen und
+etwas hin und her schieben muss. Ein Mensch, der vor einer 1920×1080-Kamera
+herumfuchtelt, bewegt zu wenig Bildfläche, um in der Encode-Zeit aufzutauchen —
+der erste Anlauf dieser Messreihe ist genau daran gescheitert.
+
+Zwei Sackgassen auf dem Weg dorthin, damit sie niemand noch einmal geht:
+**Bits/Frame als Mass für die Schwierigkeit der Szene** funktioniert nicht (die
+Ratenregelung pinnt sie, siehe M2 oben), und zwar auch nicht bei hoher Bitrate.
+**Den Capture-Puffer per GDB auszulesen**, um zu sehen was die Kamera liefert,
+funktioniert ebenfalls nicht: `monitor halt` reisst den CSI-Link mit, und was
+danach im Puffer steht, ist ein eingefrorenes Standbild von unbestimmtem Alter.
+Wer wissen will, was die Kamera sieht, nimmt den CsiProbe-Build und `grab`.
 
 Zwei Firmware-Fehler sind bei M2 aufgefallen und behoben, beide unabhängig vom
 Messziel:
