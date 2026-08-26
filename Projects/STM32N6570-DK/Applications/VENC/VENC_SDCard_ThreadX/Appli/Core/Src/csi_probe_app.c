@@ -17,6 +17,8 @@
 #include <string.h>
 
 #include "csi_grab.h"
+#include "csi_mux.h"
+#include "csi_phase.h"
 #include "csi_preview.h"
 #include "csi_probe.h"
 #include "main.h"
@@ -52,7 +54,16 @@ void BSP_CAMERA_FrameEventCallback(uint32_t Instance)
 {
   if (Instance == DCMIPP_PIPE1)
   {
-    csi_preview_on_pipe1_frame();
+    /* Both own PIPE1, never at the same time: 'mux' stops the preview before it
+       configures the pipe, and clears its flag before the pipe is stopped. */
+    if (csi_mux_active())
+    {
+      csi_mux_on_pipe1_frame();
+    }
+    else
+    {
+      csi_preview_on_pipe1_frame();
+    }
   }
 }
 
@@ -172,6 +183,14 @@ static void print_help(void)
          "                     0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR\n"
          "  dual <vcL> <vcR>   preview two channels side by side\n"
          "  off                stop the preview\n"
+         "  phase [n]          M0: timestamp the frame delimiters of VC0 and VC1\n"
+         "                     over n frames and report whether their frames are\n"
+         "                     serialised or interleaved, and what gap is left\n"
+         "                     between them (default 120)\n"
+         "  mux <vcA> <vcB> [s]  M1: capture both channels alternately into one\n"
+         "                     composite NV12 frame for s seconds and report the\n"
+         "                     frames kept against the frames the source sent\n"
+         "                     (default 60 s). Needs a prior 'probe'\n"
          "  errors [ms]        clear every CSI flag, then count what comes back,\n"
          "                     next to the frame count over the same window\n"
          "  status             CSI status registers, error counters and preview\n"
@@ -341,6 +360,26 @@ static void handle_command(char *line)
         source_from_probe(arg_u32(line, 1U, 1U), &right))
     {
       (void)csi_preview_dual(&left, &right);
+    }
+  }
+  else if (strncmp(line, "phase", 5) == 0)
+  {
+    /* Link level only - no pixel pipe is touched, so whatever is previewing may
+       keep running; its frames are part of what is being measured. */
+    (void)csi_phase_run(0x3U, arg_u32(line, 0U, 0U));
+  }
+  else if (strncmp(line, "mux ", 4) == 0)
+  {
+    csi_preview_source_t first;
+    csi_preview_source_t second;
+
+    /* The preview owns PIPE1 and would fight over the flow selection. */
+    csi_preview_stop();
+
+    if (source_from_probe(arg_u32(line, 0U, 0U), &first) &&
+        source_from_probe(arg_u32(line, 1U, 1U), &second))
+    {
+      (void)csi_mux_run(&first, &second, arg_u32(line, 2U, 0U));
     }
   }
   else if (strcmp(line, "off") == 0)
