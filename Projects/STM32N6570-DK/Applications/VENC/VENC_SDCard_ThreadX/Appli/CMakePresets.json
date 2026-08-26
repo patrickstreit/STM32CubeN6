@@ -30,6 +30,13 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CSI_PROBE_MODE": "ON"
             }
+        },
+        {
+            "name": "DebugAxiInput",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_M2_AXISRAM_INPUT": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -44,6 +51,10 @@
         {
             "name": "CsiProbe",
             "configurePreset": "CsiProbe"
+        },
+        {
+            "name": "DebugAxiInput",
+            "configurePreset": "DebugAxiInput"
         }
     ]
 }

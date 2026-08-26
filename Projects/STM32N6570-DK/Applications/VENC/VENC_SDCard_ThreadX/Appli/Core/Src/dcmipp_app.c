@@ -278,6 +278,34 @@ int dcmipp_config(void *luma_address)
   int semiplanar = dcmipp_is_semiplanar();
   if (semiplanar < 0) return -1;
 
+  /* Re-apply the pixel packer, because the format and the pitch can have been
+     changed since MX_DCMIPP_Init() ran - the encode-time model switches between
+     YUYV and NV12 between runs (PLAN.md M2). Writing them on every start keeps
+     the pipe and hDcmippH264Instance from drifting apart, and costs two
+     register writes when nothing changed. */
+  {
+    DCMIPP_PipeConfTypeDef pipe_conf = {0};
+
+    pipe_conf.FrameRate         = DCMIPP_FRAME_RATE_ALL;
+    pipe_conf.PixelPackerFormat = hDcmippH264Instance.format;
+    pipe_conf.PixelPipePitch    = hDcmippH264Instance.pitch;
+
+    /* Nothing is capturing at this point - the pipeline is stopped - so a pipe
+       still marked BUSY is the residue of a stop that timed out. Left alone it
+       makes every SetConfig below fail. */
+    if (hcamera_dcmipp.PipeState[DCMIPP_PIPE1] == HAL_DCMIPP_PIPE_STATE_BUSY)
+    {
+      hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
+      printf("DCMIPP pipe 1 was still busy, state cleared before reconfiguring\n");
+    }
+
+    if (HAL_DCMIPP_PIPE_SetConfig(&hcamera_dcmipp, DCMIPP_PIPE1, &pipe_conf) != HAL_OK)
+    {
+      printf("DCMIPP pixel packer reconfiguration failed\n");
+      return -1;
+    }
+  }
+
   dcmipp_get_address(luma_address, &planar_address, &semi_planar_address);
 
   /* No sensor/ISP involved: the CSI-2 stream is already running (CrossLink);

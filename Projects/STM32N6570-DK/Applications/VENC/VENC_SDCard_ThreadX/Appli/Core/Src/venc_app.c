@@ -33,6 +33,7 @@
 #include "dcmipp_app.h"
 #include "frame_rb.h"
 #include "instrumentation.h"
+#include "venc_bench.h"
 
 
 /** @addtogroup Templates
@@ -465,6 +466,10 @@ static int encode_frame(uint32_t frame_id)
   int ret = H264ENC_FRAME_READY;
     uint32_t outBufSize;
   uint32_t buff_size = g_max_output_buffer_size ? g_max_output_buffer_size : outputBlockSize;
+  uint32_t encode_start;
+  uint32_t encode_cycles = 0U;
+  uint32_t copy_cycles   = 0U;
+  bool     was_intra;
 
   frame_buffer.frame_id = frame_id;
 
@@ -481,6 +486,9 @@ static int encode_frame(uint32_t frame_id)
   }
   encIn.ipf = H264ENC_REFERENCE_AND_REFRESH;
   encIn.ltrf = H264ENC_REFERENCE;
+  /* Read before the encode: the coding type is advanced on the way out, and
+     the time model keeps intra and inter apart. */
+  was_intra = (encIn.codingType == H264ENC_INTRA_FRAME);
   
 
    DCMIPP_FullPlanarDstAddressTypeDef  planar_address;
@@ -520,10 +528,38 @@ static int encode_frame(uint32_t frame_id)
   encIn.outBufSize = outBufSize;
   
 
+  /* The encoder can be pointed at a copy of the frame in AXISRAM instead of the
+     capture buffer in PSRAM. The copy is deliberately outside the timed region:
+     what is under test is the memory the encoder reads from, not the cost of
+     putting the frame there. (PLAN.md M2, variant b.) */
+  if (venc_bench_input_src() == VENC_INPUT_FROM_AXISRAM)
+  {
+    uint32_t stage_size = 0U;
+    uint8_t *stage      = venc_bench_stage_buffer(&stage_size);
+    uint32_t luma_bytes = (uint32_t)hVencH264Instance.cfgH264Main.width *
+                          GetDCMIPPNbLinesCaptured();
+    uint32_t frame_bytes = luma_bytes + (luma_bytes / 2U);   /* NV12 */
+
+    if ((stage != NULL) && (frame_bytes <= stage_size))
+    {
+      uint32_t t0 = venc_bench_now();
+      /* Luma and chroma are contiguous in the capture buffer, so one copy does
+         both planes. */
+      (void)memcpy(stage, (const void *)encIn.busLuma, frame_bytes);
+      copy_cycles = venc_bench_now() - t0;
+
+      encIn.busLuma    = (uint32_t)stage;
+      encIn.busChromaU = (uint32_t)stage + luma_bytes;
+      encIn.busChromaV = encIn.busChromaU;
+    }
+  }
+
   /* Encode Frame*/
   INSTR_EVENT(INSTR_ID_VENC_SUBMITTED, frame_id, (uint32_t)encIn.codingType,
               frb_get_frames_stored(), buff_size);
+  encode_start = venc_bench_now();
   ret = H264EncStrmEncode(encoder, &encIn, &encOut, NULL, NULL, NULL);
+  encode_cycles = venc_bench_now() - encode_start;
 
   /* Measure encode time*/
   timeMonitor();
@@ -539,6 +575,21 @@ static int encode_frame(uint32_t frame_id)
       INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)ret, 0U, 0U);
       return -1;
     }
+    venc_bench_sample(was_intra, encode_cycles, encOut.streamSize, copy_cycles);
+
+    if (venc_bench_discard())
+    {
+      /* A measurement must not be able to stall on the recording path: with the
+         output dropped here, a slow card can no longer back the ring buffer up
+         and turn "how long does the encoder take" into "how long did it wait
+         for a block". */
+      release_output_block(frame_buffer.block_addr);
+      encIn.codingType = H264ENC_PREDICTED_FRAME;
+      nb_encoded_frame++;
+      frame_nb++;
+      return 0;
+    }
+
     invalidate_dcache_region((const void *)encIn.pOutBuf, encOut.streamSize);
     frame_buffer.coding_type = (uint32_t)encIn.codingType;
     frame_buffer.size = encOut.streamSize;
@@ -590,7 +641,17 @@ static int encoder_end(void){
   
   printf("\x1b[31mStopping camera and encoder !!!\x1b[0m\n");
   
-  BSP_CAMERA_Stop(0);
+  if (BSP_CAMERA_Stop(0) != BSP_ERROR_NONE)
+  {
+    /* HAL_DCMIPP_CSI_PIPE_Stop() waits for the virtual channel to go inactive
+       and gives up when it does not. It then leaves PipeState at BUSY, and from
+       there every HAL_DCMIPP_PIPE_SetConfig() on pipe 1 returns HAL_ERROR - so
+       one rough stop would make every later start fail. Put the channel and the
+       state back by hand. */
+    SET_BIT(CSI->CR, CSI_CR_VC0STOP);
+    hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
+    printf("camera stop timed out, pipe state restored by hand\n");
+  }
   int ret = H264EncStrmEnd(encoder, &encIn, &encOut);
   if (ret != H264ENC_OK)
   {
@@ -833,6 +894,26 @@ UINT VENC_APP_EncodingStop(void)
     return TX_NOT_DONE;
   }
   return TX_SUCCESS;
+}
+
+int VENC_APP_ReinitEncoder(void)
+{
+  if (g_pipeline_state != VENC_APP_PIPELINE_STOPPED)
+  {
+    return -1;
+  }
+
+  /* The encoder holds the picture geometry, the coding tools and the rate
+     control from H264EncInit onwards, and several of them cannot be changed on
+     a live instance. Releasing and building it again is the only way to try a
+     different set - which is what the M2 measurements do between runs. */
+  if (encoder != NULL)
+  {
+    (void)H264EncRelease(encoder);
+    encoder = NULL;
+  }
+
+  return encoder_prepare();
 }
 
 void VENC_APP_GetStatus(VENC_APP_Status_t *status)

@@ -72,6 +72,17 @@ extern TX_QUEUE enc_frame_queue;
 void venc_thread_func(ULONG arg);
 
 /**
+ * @brief  Release the encoder instance and build it again from the current
+ *         configuration.
+ * @retval int 0 on success, -1 when the pipeline is not stopped or the encoder
+ *         refused the configuration.
+ *
+ * Geometry, coding tools and rate control are fixed at H264EncInit; trying a
+ * different set means a new instance. Only legal while stopped.
+ */
+int VENC_APP_ReinitEncoder(void);
+
+/**
  * @brief  Start the video encoding pipeline.
  * @retval UINT ThreadX-style status
  */

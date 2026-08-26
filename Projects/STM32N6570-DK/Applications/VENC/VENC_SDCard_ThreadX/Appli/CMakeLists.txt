@@ -64,6 +64,17 @@ if(CSI_PROBE_MODE)
     list(APPEND APP_Defines CSI_PROBE_MODE)
 endif()
 
+# PLAN.md M2 variant (b): let the encoder read its input picture from AXISRAM
+# instead of the PSRAM capture buffer. The staging frame is 1.32 MB and only
+# fits into the non-cacheable AXISRAM region next to a smaller bitstream ring,
+# so this option shrinks that too - which is where the plan wants it anyway.
+option(VENC_M2_AXISRAM_INPUT "Stage the encoder input frame in AXISRAM (PLAN.md M2)" OFF)
+
+if(VENC_M2_AXISRAM_INPUT)
+    list(APPEND APP_Defines VENC_M2_AXISRAM_INPUT)
+    list(APPEND APP_Defines VENC_OUTPUT_BUFFER_SIZE=1000000U)
+endif()
+
 # --------------------------------------------------------------------------
 # Include paths
 # --------------------------------------------------------------------------
@@ -131,6 +142,7 @@ set(APP_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/stm32n6xx_it.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/SystemClock_Config_800MHz.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/venc_app.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/venc_bench.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/venc_h264_config.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/tx_initialize_low_level.S
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Patch/stm32n6570_discovery_camera.c

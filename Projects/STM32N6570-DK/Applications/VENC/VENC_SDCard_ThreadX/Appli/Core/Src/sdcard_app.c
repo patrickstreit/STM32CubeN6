@@ -26,6 +26,7 @@
 #include "h264encapi.h"
 #include "st_monitor_bitrate.h"
 #include "venc_app.h"
+#include "venc_bench.h"
 #include "instrumentation.h"
 
 /* Private typedef -----------------------------------------------------------*/
@@ -121,7 +122,11 @@ void sdcard_thread_func(ULONG arg)
     {
       VENC_APP_Status_t venc_status;
       VENC_APP_GetStatus(&venc_status);
-      if (venc_status.state == VENC_APP_PIPELINE_RUNNING)
+      /* An empty queue is expected while the encode-time model is running: it
+         drops the encoded frames on purpose. Saying so sixty times a second
+         floods the console the measurement is driven over, and the board loses
+         console characters to the flood. */
+      if ((venc_status.state == VENC_APP_PIPELINE_RUNNING) && !venc_bench_discard())
       {
         printf("Failed to get encoded data\n");
       }

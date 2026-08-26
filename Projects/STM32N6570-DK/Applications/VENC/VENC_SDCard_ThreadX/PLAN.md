@@ -67,12 +67,16 @@ strukturell, nicht implementierungsbedingt.
   400 MHz); 27 ms/720p ≈ Datasheet-Klasse (1080p15) → nahe Nominal. ST benennt
   Memory-Bandbreite als Bottleneck; „VENC liest Chroma doppelt → ø 16 bpp
   Input-Traffic".
-- Encode-Zeit-Hebel: Auflösung (448×1792 = 3136 MBs → rechnerisch ~24 ms bei
-  heutigen 7,5 µs/MB), NV12 statt YUYV, Input-Buffer AXISRAM statt uncached
-  PSRAM, `enableCabac=2` (offiziell „Performance optimized": Intra CAVLC /
-  Inter CABAC), `transform8x8Mode=0`. **Höhere Bitrate macht Encoding nicht
-  schneller** (eher minimal langsamer); 10 Mbit/s unkritisch (API bis
-  40 Mbit/s, Level 4.1 reicht).
+- Encode-Zeit-Hebel — **von M2 auf zwei zusammengeschrumpft**: Auflösung
+  (448×1792 = 3136 MBs → gemessen 22,7 ms bei 7,2 µs/MB) und **Input-Buffer
+  AXISRAM statt uncached PSRAM (−31 %)**. NV12 statt YUYV, `enableCabac=2`
+  (offiziell „Performance optimized": Intra CAVLC / Inter CABAC) und
+  `transform8x8Mode=0` liegen alle im Rauschen — die Recherche-Erwartung, hier
+  Zeit zu holen, hat die Messung nicht bestätigt. Ebenso widerlegt: „höhere
+  Bitrate macht Encoding nicht schneller" — 10 Mbit/s ist 11 % *schneller* als
+  2 Mbit/s, weil die Ratenregelung weniger zu tun hat. 10 Mbit/s ist also nicht
+  nur unkritisch (API bis 40 Mbit/s, Level 4.1 reicht), sondern der günstigere
+  Betriebspunkt.
 - Budget: 448×1792@25 ≈ 59 % VENC-Auslastung → Luft bis ~30 fps Composite. Nach
   M1 liegt die Composite-Rate bei 24,8 fps (ein Composite = je ein Segment pro
   Kanal), also im günstigen Ast dieser Rechnung.
@@ -132,24 +136,62 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   also ~380 µs Reserve. Die Switch-Latenz ist nicht der Engpass, die
   Verschachtelung der Quelle ist es. Beide Segmente tragen echtes Bild
   (Luma-Mittel 122 bzw. 148, zwei verschiedene Kameras).
-- [ ] **GATE (User-Entscheid): die ursprüngliche Bedingung greift nicht.** Er war an
-  „M0/M1 zeigen serielle Frames" geknüpft; die Quelle ist verschachtelt, und die
+- [x] **GATE (User-Entscheid): 24,8 fps/Kamera sind akzeptiert** (Patrick,
+  2026-08-26). Die ursprüngliche Bedingung greift nicht: sie war an „M0/M1
+  zeigen serielle Frames" geknüpft, die Quelle ist verschachtelt, und die
   Switch-Latenz (5,7 µs gegen 387,5 µs Gap) ist gerade nicht das Problem. Eine
   CrossLink-Anpassung auf 25 fps pro Sensor würde den Capture nicht drop-frei
-  machen, sondern nur auf 12,5 fps pro Kamera halbieren — sie ist hier also
+  machen, sondern nur auf 12,4 fps pro Kamera halbieren — sie wäre hier
   kontraproduktiv.
-  **Offener User-Entscheid stattdessen:** 24,8 fps/Kamera akzeptieren und mit
-  M2/Phase 1 weitermachen (Empfehlung — der Rest des Pfads ist davon unberührt),
-  oder vorher CrossLink-Variante C (FPGA-Composite) angehen, wenn die vollen
-  49,6 fps bzw. später >12,4 fps bei 4 Sensoren gebraucht werden.
-- [ ] **M2 — VENC-Zeitmodell** (Encoder-Build): Baseline 720p YUYV (~27 ms),
-  dann einzeln: (a) NV12 (`DCMIPP_PIXEL_PACKER_FORMAT_YUV420_2` +
-  `H264ENC_YUV420_SEMIPLANAR`, Pfade existieren), (b) `input_frame` in AXISRAM
-  (Bitstream-Ring temporär verkleinern), (c) `enableCabac=2`,
-  (d) `transform8x8Mode=0`, (e) Bitrate 2 vs. 10 Mbit/s.
-  **Ergebnis:** µs/MB je Variante → welche Composite-Rate (24/25/30/48)
-  verträgt 448×1792; finale Buffer-Platzierung. Zielrate steht nach M1 fest:
-  24,8 fps Composite.
+  **Folge für den Rest des Plans:** Composite-Rate = 24,8 fps, das ist der
+  günstige Ast des VENC-Budgets. Die vollen 49,6 fps blieben nur über
+  CrossLink-Variante C (FPGA-Composite) erreichbar; das ist damit vertagt, nicht
+  verworfen — spätestens bei 4 Sensoren (~12,4 fps/Kamera) kommt die Frage
+  wieder.
+- [x] **M2 — VENC-Zeitmodell** (Encoder-Build, neues Kommando `bench [n]` plus
+  `cfg`/`format`/`inbuf`/`cabac`/`t8x8`/`bitrate`, `Appli/Core/Src/venc_bench.c`):
+  Baseline 720p YUYV (~27 ms), dann einzeln: (a) NV12
+  (`DCMIPP_PIXEL_PACKER_FORMAT_YUV420_2` + `H264ENC_YUV420_SEMIPLANAR`),
+  (b) `input_frame` in AXISRAM (Bitstream-Ring temporär verkleinert),
+  (c) `enableCabac=2`, (d) `transform8x8Mode=0`, (e) Bitrate 2 vs. 10 Mbit/s.
+  Gemessen wird ausschliesslich `H264EncStrmEncode()` auf Live-Kamerabildern
+  (ein Standbild machte Inter-Frames unrealistisch billig), Ausgabe wird
+  verworfen, damit die SD-Karte nicht mitmisst.
+  **Ergebnis (720p = 3600 MB, je 200 Frames in zwei Durchläufen; (b) 60
+  Frames, weil die Stage-Kopie den Lauf auf 5,5 fps drückt):**
+
+  | Variante | µs/MB (P1 / P2) | ms/Frame | 448×1792 | max. Composite-Rate |
+  |---|---|---|---|---|
+  | Baseline YUYV, cabac=1, t8x8=1, 2 Mbit/s | 7,24 / 7,19 | 26,1 / 25,9 | 22,7 ms | 44,0 fps |
+  | (a) NV12 | (7,59) / 7,07 | 25,5 | 22,2 ms | 45,1 fps |
+  | (c) `enableCabac=2` | 7,24 / 7,20 | 26,1 / 26,0 | 22,6 ms | 44,3 fps |
+  | (d) `transform8x8Mode=0` | 7,31 / 7,30 | 26,4 / 26,3 | 22,9 ms | 43,7 fps |
+  | (e) 10 Mbit/s | 6,45 / 6,42 | 23,2 / 23,1 | 20,1 ms | 49,7 fps |
+  | (b) NV12 aus AXISRAM | **4,83** | **17,4** | **15,1 ms** | **66,0 fps** |
+
+  Der P1-Wert von (a) ist eingeklammert: in diesem Lauf steckt ein einzelner
+  150-ms-Ausreisser (SD-Nachlauf), P2 ist der saubere. Streuung derselben
+  Konfiguration zwischen Läufen ≈ 1 %; (a), (c) und (d) liegen damit alle im
+  Rauschen der Baseline — **Format, Entropiecoder und 8×8-Transform kosten
+  praktisch nichts**. Nur zwei Dinge bewegen die Zeit wirklich:
+  1. **Woher der Encoder das Bild liest.** Aus AXISRAM statt PSRAM sind es
+     31 % weniger Encode-Zeit (25,2 → 17,4 ms). Der Encoder ist beim Lesen der
+     Quelle speicherlimitiert, nicht rechenlimitiert.
+  2. **Die Bitrate — mit umgekehrtem Vorzeichen als erwartet.** 10 Mbit/s ist
+     11 % *schneller* als 2 Mbit/s (23,1 vs. 25,9 ms): bei 2 Mbit/s arbeitet die
+     Ratenregelung härter, bei 10 Mbit/s läuft sie fast im Leerlauf.
+
+  **Antwort auf die Planfrage:** 448×1792 passt bei 24,8 fps mit grossem
+  Abstand. Budget 40,3 ms/Frame, teuerste gemessene Variante 22,9 ms → **57 %
+  Auslastung**. Selbst 30 fps (33,3 ms) und 44 fps wären mit dem Baseline-Setup
+  drin; der Engpass bleibt die Capture-Seite aus M0/M1, nicht der Encoder.
+  **Finale Buffer-Platzierung:** Composite-Buffer nach AXISRAM. Er misst
+  448·1792·1,5 = 1,20 MB und passt damit in die NOCACHE-Region (2,77 MB) neben
+  einen verkleinerten Bitstream-Ring. Das ist keine Notwendigkeit mehr (PSRAM
+  reicht rechnerisch), aber 7,5 ms Reserve je Frame, die nichts kosten.
+  **Nicht per CPU-Kopie:** die DCMIPP muss direkt dorthin schreiben. Die in (b)
+  gemessene Stage-Kopie kostet **146,5 ms je Frame** (1,38 MB → 9,4 MB/s), weil
+  beide Regionen uncached sind — sie war nur das Messmittel, nie der Vorschlag.
 - [ ] **M3 — Störpakete**: 0x12/0x2f-Pakete und permanenter IDERR korrumpieren
   den Pipe1-Semiplanar-Capture nicht (im Preview bekannt harmlos; einmal im
   Encoder-Setup verifizieren).
@@ -228,6 +270,68 @@ ISR-Latenzen stehen als min/avg/max im Konsolen-Report, dafür braucht es kein
 Perfetto; neue Instr-IDs wären erst nützlich, wenn Capture und Encoder im selben
 Trace korreliert werden müssen (M2/Phase 2).
 
+### Rohdaten M2 (2026-08-26, Encoder-Build)
+
+Der Encoder-Build kann alle M2-Varianten zur Laufzeit umstellen, ausser (b):
+die Stage-Puffer in AXISRAM gibt es nur im Preset `DebugAxiInput`
+(`-DVENC_M2_AXISRAM_INPUT=ON`, verkleinert nebenbei den Bitstream-Ring auf
+1 MB). `bench` startet die Pipeline selbst, wenn sie steht, und stoppt sie
+danach wieder — die Konsole pollt die UART byteweise ohne FIFO, und solange (b)
+läuft, verliert sie jedes Kommando. Ein Board, das in dieser Konfiguration
+weiterläuft, nimmt keinen Befehl mehr an; erst diese Symmetrie machte die
+Messreihe automatisierbar.
+
+```powershell
+cmake --build --preset Debug            # bzw. DebugAxiInput für (b)
+./Tools/debug/stm32n6-gdb.ps1 -FlashAppli -Preset Debug
+C:\repositories\dutpower\.venv\Scripts\dutpower.exe cycle
+./Tools/debug/csi-console.ps1 -Sequence "stop; format nv12; cabac 1; t8x8 1; bitrate 2000000; bench 200"
+```
+
+```
+=== VENC RESULT ===
+cpu_hz=800000000  width=1280  height=720  macroblocks=3600
+pixel_format=NV12       input_src=axisram
+cabac=1  transform8x8=1  bitrate=2000000  gop=30  framerate_cfg=30
+window_ms=10875         frames=60
+intra.n=2   intra.us_min=13828  intra.us_avg=13849  intra.us_max=13870
+inter.n=59  inter.us_min=16960  inter.us_avg=17513  inter.us_max=17867
+stage_copy.n=61  stage_copy.us_min=146364  stage_copy.us_avg=146540  stage_copy.us_max=146711
+all.us_avg=17391        all.us_per_mb_x100=483   inter.us_per_mb_x100=486
+max_fps_x100=5750       stream_kbytes=510        stream_kbit_per_s=384
+composite_mbs=3136      composite_us=15146       composite_max_fps_x100=6602
+=== END ===
+```
+
+Zum Vergleich derselbe Lauf mit `inbuf capture`: `all.us_avg=25166`,
+`all.us_per_mb_x100=699`, `composite_max_fps_x100=4562`. Ein zweiter Durchlauf
+reproduziert beide Seiten auf drei Stellen (25171 / 17396 µs, Stage-Kopie
+146551 µs). Gleiche Bits je Frame
+(8,1 vs. 8,5 KB), also ein fairer Vergleich; und weil zwischen zwei Frames im
+AXISRAM-Lauf 164 ms statt 26 ms liegen, ist die Szene dort *stärker* verändert
+— der 31-%-Vorteil ist eher konservativ als geschönt.
+
+`stream_kbit_per_s` ist im (b)-Lauf niedrig (384), weil das Fenster die
+Stage-Kopien enthält; die Ratenregelung ist auf 30 fps konfiguriert, real kamen
+5,5 fps an. Für das Zeitmodell irrelevant, `us_per_mb` misst nur den Encode.
+
+Zwei Firmware-Fehler sind bei M2 aufgefallen und behoben, beide unabhängig vom
+Messziel:
+
+- **EWL-Chunk-Tabelle wächst monoton.** `EWLFreeLinear()` gibt den Speicher
+  zurück, lässt den Eintrag aber in `chunks[]` stehen und senkt `totalChunks`
+  nie; `EWLInit()`/`EWLRelease()` auch nicht. Nach dem vierten
+  Encoder-Neu-Init schreibt die Allokation über `chunks[MEM_CHUNKS]` hinaus →
+  HardFault in `EWLMallocLinear()`. Behoben mit einem starken Override in
+  `venc_h264_config.c`, das die Lücke schliesst (die Funktion ist `__weak`,
+  Middleware bleibt unangetastet). Zehn Format-Wechsel hintereinander laufen
+  jetzt durch.
+- **Pipe-State bleibt nach hartem Stopp auf BUSY.** Wenn
+  `HAL_DCMIPP_CSI_PIPE_Stop()` in den Timeout läuft, scheitert danach jedes
+  `HAL_DCMIPP_PIPE_SetConfig()` auf Pipe 1 — ein rauher Stopp machte jeden
+  weiteren Start unmöglich („DCMIPP pixel packer reconfiguration failed").
+  Derselbe Handgriff wie in `csi_grab.c`: VC stoppen, State zurücksetzen.
+
 ## Phase 1 — Composite-Capture produktiv
 
 Dateien: `Appli/Core/Src/dcmipp_app.c`, `venc_app.c`, `venc_h264_config.*`
@@ -249,11 +353,13 @@ parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste ändert).
 - [ ] `H264EncConfig`: 448×1792, `frameRate` = gemessene Composite-Rate (M1:
   24,8 fps),
   Level 4.1, NV12-Preproc; Rate-Ctrl: `bitPerSecond=10_000_000`, `hrdCpbSize`
-  anpassen, `gopLen` ≈ Framerate; Coding nach M2 (`enableCabac`,
-  `transform8x8Mode`).
-- [ ] Buffer-Layout nach M2: Composite-Buffer und/oder EWL-Ref-Frames nach
-  AXISRAM; Bitstream-Ring auf 1–1,5 MB; EWL-Pool 8 → ~4 MB; Linkerscript-Fix
-  PSRAM 16→32 MB (`STM32N657XX.ld`).
+  anpassen, `gopLen` ≈ Framerate; Coding nach M2: `enableCabac` und
+  `transform8x8Mode` bleiben auf den Defaults (1 / 1) — M2 hat gezeigt, dass
+  beide die Zeit nicht messbar bewegen, also entscheidet die Qualität.
+- [ ] Buffer-Layout nach M2: **Composite-Buffer nach AXISRAM** (1,20 MB, spart
+  7,5 ms je Frame, siehe M2 (b)) — die DCMIPP schreibt direkt dorthin, keine
+  CPU-Kopie; EWL-Ref-Frames nach Bedarf; Bitstream-Ring auf 1–1,5 MB;
+  EWL-Pool 8 → ~4 MB; Linkerscript-Fix PSRAM 16→32 MB (`STM32N657XX.ld`).
 - [ ] Verifikation: Encode-Zeit-Trace; `H264ENC_FUSE_ERROR`-frei ≥10 min;
   ffprobe/ffplay: 448×1792, Ziel-fps, ~10 Mbit/s.
 

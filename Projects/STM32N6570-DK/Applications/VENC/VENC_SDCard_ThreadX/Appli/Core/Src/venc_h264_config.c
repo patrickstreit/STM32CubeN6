@@ -17,6 +17,9 @@
 #include "utils.h"
 #include "stm32n6xx_hal.h"
 #include "venc_h264_config.h"
+#include "tx_api.h"
+#include "ewl.h"
+#include "ewl_impl.h"
 
 #define FULL_1080P_SLICE               1U
 #define FULL_1080P_FRAME               2U
@@ -222,6 +225,50 @@ void EWLPoolReleaseCb(u8 **pool_ptr)
 }
 
 /**
+ * @brief  Release a linear buffer and take its slot out of the chunk table.
+ *
+ * The stock EWLFreeLinear() returns the memory to the byte pool but leaves the
+ * entry in chunks[]/alignedChunks[] and never lowers totalChunks. Nothing in
+ * EWLInit() or EWLRelease() lowers it either, so the counter only ever grows:
+ * an application that releases and re-initialises the encoder - which is what
+ * changing the pixel format or the entropy coder at runtime does - writes past
+ * chunks[MEM_CHUNKS] on the 33rd allocation of its lifetime and hard-faults.
+ * Closing the gap here keeps the table in step with what is actually held.
+ *
+ * Only the ThreadX allocator is overridden - that is the one this application
+ * builds with, and the other branches free by a different route.
+ *
+ * @param  instance EWL instance the buffer belongs to.
+ * @param  info     Buffer descriptor, cleared on return.
+ */
+#if (EWL_ALLOC_API == EWL_USE_THREADX_MM)
+void EWLFreeLinear(const void *instance, EWLLinearMem_t *info)
+{
+  VENC_EWL_TypeDef *inst = (VENC_EWL_TypeDef *)instance;
+
+  for (u32 i = 0U; i < inst->totalChunks; i++)
+  {
+    if (inst->alignedChunks[i] == info->virtualAddress)
+    {
+      (void)tx_byte_release(inst->chunks[i]);
+
+      for (u32 j = i + 1U; j < inst->totalChunks; j++)
+      {
+        inst->chunks[j - 1U]        = inst->chunks[j];
+        inst->alignedChunks[j - 1U] = inst->alignedChunks[j];
+      }
+      inst->totalChunks--;
+      break;
+    }
+  }
+
+  info->virtualAddress = NULL;
+  info->busAddress = 0;
+  info->size = 0;
+}
+#endif /* EWL_ALLOC_API == EWL_USE_THREADX_MM */
+
+/**
  * @brief  Get pointer to input frame buffer and optionally its size.
  * @param  frameSize Optional output: size of input frame in bytes.
  * @retval uint8_t* Pointer to input frame buffer.
@@ -279,7 +326,10 @@ bool IsHwHanshakeMode(void)
  */
 uint32_t GetDCMIPPFormat(void)
 {
-    return (uint32_t)DCMIPP_FORMAT;
+    /* The instance, not the compile-time default: the pixel packer format is
+       switched at runtime while the pipeline is stopped so the encode-time
+       model can compare YUYV against NV12 in one binary (PLAN.md M2). */
+    return hDcmippH264Instance.format;
 }
 
 /**
