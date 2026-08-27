@@ -115,6 +115,19 @@ UINT VENC_APP_EncodingStop(void);
 void VENC_APP_GetStatus(VENC_APP_Status_t *status);
 
 /**
+  * @brief  Run a sustained error tally and print it (PLAN.md M3).
+  *
+  * Records for @p seconds with the pipeline running, then reports what the
+  * CSI-2 receiver, the DCMIPP and the encoder complained about in that window.
+  * The question the plan asks is not whether the stray 0x12/0x2f packets and
+  * the permanent IDERR ever appear - they do - but whether anything downstream
+  * of them accumulates.
+  *
+  * @param  seconds Length of the observation window.
+  */
+void VENC_APP_WatchErrors(uint32_t seconds);
+
+/**
  * @brief  Convert a pipeline state to a printable string.
  */
 const char *VENC_APP_PipelineStateName(VENC_APP_PipelineState_t state);

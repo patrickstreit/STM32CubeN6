@@ -80,6 +80,20 @@ static uint32_t g_max_output_buffer_size = 0U;
 /* frame_id of the block handed out by the last VENC_APP_GetData() call */
 static uint32_t g_curr_frame_id = 0U;
 static volatile VENC_APP_PipelineState_t g_pipeline_state = VENC_APP_PIPELINE_STOPPED;
+
+/* Error accounting for PLAN.md M3. The callbacks below already print, but a
+   sustained run needs a tally rather than a scrolling console - the question is
+   whether anything accumulates over minutes, not whether it ever happens. */
+static volatile uint32_t g_pipe_errors;
+static volatile uint32_t g_global_errors;
+static volatile uint32_t g_last_error_code;
+static volatile uint32_t g_encode_errors;
+static volatile uint32_t g_fuse_errors;
+static volatile uint32_t g_frames_skipped;
+/* Kept apart from g_encode_errors on purpose: a full output ring means the SD
+   card is behind, which is a throughput fact. Counting it as an encoder error
+   would make a healthy encoder look broken. */
+static volatile uint32_t g_ring_full;
 static volatile UINT g_pipeline_last_status = TX_NOT_AVAILABLE;
 static volatile uint32_t g_venc_events_ready = 0U;
 
@@ -302,11 +316,13 @@ void venc_thread_func(ULONG arg)
         if (IsVideoOverflow())
         {
           nbFrameSkip++;
+          g_frames_skipped++;
           INSTR_EVENT(INSTR_ID_FRAME_DROPPED, frame_id, nbFrameSkip, 1U /* CAPTURE_OVERFLOW */, 0U);
           continue; 
         }
         if(encode_frame(frame_id))
         {
+          g_encode_errors++;
           printf("error encoding frame\n");
         }
         else
@@ -517,6 +533,7 @@ static int encode_frame(uint32_t frame_id)
   frame_buffer.block_addr = (uint32_t *)frb_alloc(&buff_size);
   if (frame_buffer.block_addr == NULL)
   {
+    g_ring_full++;
     printf("VENC : failed to allocate output buffer\n");
     return -1;
   }
@@ -599,6 +616,7 @@ static int encode_frame(uint32_t frame_id)
     }
     if (frb_push(frame_buffer.block_addr, frame_buffer.size, 0U) == false)
     {
+      g_ring_full++;
       release_output_block(frame_buffer.block_addr);
       INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)-1, frame_buffer.size, 0U);
       return -1;
@@ -614,6 +632,7 @@ static int encode_frame(uint32_t frame_id)
      nb_encoded_frame++;
     break;
   case H264ENC_FUSE_ERROR:
+    g_fuse_errors++;
     printf("DCMIPP and VENC desync (frame#%ld), restart the video\n", frame_nb);
     release_output_block(frame_buffer.block_addr);
     INSTR_EVENT(INSTR_ID_VENC_ERROR, frame_id, (uint32_t)ret, 0U, 0U);
@@ -782,6 +801,8 @@ static void print_dcmipp_error_code(uint32_t err)
  */
 void BSP_CAMERA_PipeErrorCallback(uint32_t Instance)
 {
+  g_pipe_errors++;
+  g_last_error_code = hcamera_dcmipp.ErrorCode;
   printf("DCMIPP PIPE%lu error, ErrorCode=0x%08lx", (unsigned long)Instance, (unsigned long)hcamera_dcmipp.ErrorCode);
   print_dcmipp_error_code(hcamera_dcmipp.ErrorCode);
   printf("\n");
@@ -793,6 +814,8 @@ void BSP_CAMERA_PipeErrorCallback(uint32_t Instance)
  */
 void BSP_CAMERA_ErrorCallback(uint32_t Instance)
 {
+  g_global_errors++;
+  g_last_error_code = hcamera_dcmipp.ErrorCode;
   printf("DCMIPP global error, ErrorCode=0x%08lx", (unsigned long)hcamera_dcmipp.ErrorCode);
   print_dcmipp_error_code(hcamera_dcmipp.ErrorCode);
   printf("\n");
@@ -894,6 +917,94 @@ UINT VENC_APP_EncodingStop(void)
     return TX_NOT_DONE;
   }
   return TX_SUCCESS;
+}
+
+/* CSI_SR0 error bits that mean "the link is not decoding cleanly", and the
+   CSI_SR1 bits that mean "the D-PHY is not locked at this bitrate". Same masks
+   csi_probe.c uses - the probe build is where they were worked out. */
+#define CSI_SR0_LINK_ERRORS  (CSI_SR0_CRCERRF | CSI_SR0_ECCERRF | CSI_SR0_SYNCERRF | \
+                              CSI_SR0_SPKTERRF | CSI_SR0_WDERRF)
+
+#define CSI_SR1_PHY_ERRORS   (CSI_SR1_ESOTDL0F | CSI_SR1_ESOTSYNCDL0F | CSI_SR1_EESCDL0F | \
+                              CSI_SR1_ESYNCESCDL0F | CSI_SR1_ECTRLDL0F | \
+                              CSI_SR1_ESOTDL1F | CSI_SR1_ESOTSYNCDL1F | CSI_SR1_EESCDL1F | \
+                              CSI_SR1_ESYNCESCDL1F | CSI_SR1_ECTRLDL1F)
+
+void VENC_APP_WatchErrors(uint32_t seconds)
+{
+  uint32_t id_err = 0U, ecc = 0U, ecc_corr = 0U, crc = 0U;
+  uint32_t sync = 0U, spkt = 0U, wdg = 0U, phy = 0U, samples = 0U;
+  uint32_t frames_start, frames_end, encoded_start, encoded_end;
+  uint32_t tickstart;
+
+  if (seconds == 0U) { seconds = 60U; }
+
+  g_pipe_errors     = 0U;
+  g_global_errors   = 0U;
+  g_last_error_code = 0U;
+  g_encode_errors   = 0U;
+  g_fuse_errors     = 0U;
+  g_frames_skipped  = 0U;
+  g_ring_full       = 0U;
+
+  /* Clear the sticky link-error flags once, then sample. The frame flags
+     (SOF/EOF) are deliberately left alone: the running pipe's interrupt handler
+     owns those, and clearing them here would steal frames from it. */
+  CSI->FCR0 = CSI_SR0_LINK_ERRORS | CSI_SR0_IDERRF | CSI_SR0_CECCERRF;
+  CSI->FCR1 = CSI_SR1_PHY_ERRORS;
+
+  frames_start  = frame_received;
+  encoded_start = nb_encoded_frame;
+  tickstart     = HAL_GetTick();
+
+  while ((HAL_GetTick() - tickstart) < (seconds * 1000U))
+  {
+    uint32_t sr0 = CSI->SR0;
+    uint32_t sr1 = CSI->SR1;
+
+    if ((sr0 & CSI_SR0_IDERRF)     != 0U) { id_err++; }
+    if ((sr0 & CSI_SR0_ECCERRF)    != 0U) { ecc++; }
+    if ((sr0 & CSI_SR0_CECCERRF)   != 0U) { ecc_corr++; }
+    if ((sr0 & CSI_SR0_CRCERRF)    != 0U) { crc++; }
+    if ((sr0 & CSI_SR0_SYNCERRF)   != 0U) { sync++; }
+    if ((sr0 & CSI_SR0_SPKTERRF)   != 0U) { spkt++; }
+    if ((sr0 & CSI_SR0_WDERRF)     != 0U) { wdg++; }
+    if ((sr1 & CSI_SR1_PHY_ERRORS) != 0U) { phy++; }
+    samples++;
+
+    CSI->FCR0 = sr0 & (CSI_SR0_LINK_ERRORS | CSI_SR0_IDERRF | CSI_SR0_CECCERRF);
+    CSI->FCR1 = sr1 & CSI_SR1_PHY_ERRORS;
+
+    /* Yield: this runs on the console thread and must not starve the encoder
+       or the SD writer, which are what the measurement is about. */
+    tx_thread_sleep(1U);
+  }
+
+  frames_end  = frame_received;
+  encoded_end = nb_encoded_frame;
+
+  printf("=== M3 RESULT ===\n");
+  printf("window_s=%lu\n", (unsigned long)seconds);
+  printf("samples=%lu\n", (unsigned long)samples);
+  printf("csi.id_err=%lu\n", (unsigned long)id_err);
+  printf("csi.ecc_uncorrectable=%lu\n", (unsigned long)ecc);
+  printf("csi.ecc_corrected=%lu\n", (unsigned long)ecc_corr);
+  printf("csi.crc=%lu\n", (unsigned long)crc);
+  printf("csi.sync=%lu\n", (unsigned long)sync);
+  printf("csi.spkt=%lu\n", (unsigned long)spkt);
+  printf("csi.watchdog=%lu\n", (unsigned long)wdg);
+  printf("csi.phy=%lu\n", (unsigned long)phy);
+  printf("dcmipp.pipe_errors=%lu\n", (unsigned long)g_pipe_errors);
+  printf("dcmipp.global_errors=%lu\n", (unsigned long)g_global_errors);
+  printf("dcmipp.last_error_code=0x%08lx\n", (unsigned long)g_last_error_code);
+  printf("frames_received=%lu\n", (unsigned long)(frames_end - frames_start));
+  printf("frames_encoded=%lu\n", (unsigned long)(encoded_end - encoded_start));
+  printf("frames_skipped=%lu\n", (unsigned long)g_frames_skipped);
+  printf("ring_full=%lu\n", (unsigned long)g_ring_full);
+  printf("encode_errors=%lu\n", (unsigned long)g_encode_errors);
+  printf("fuse_errors=%lu\n", (unsigned long)g_fuse_errors);
+  printf("sd_writes=%lu\n", (unsigned long)venc_bench_sd_writes());
+  printf("=== END ===\n");
 }
 
 int VENC_APP_ReinitEncoder(void)

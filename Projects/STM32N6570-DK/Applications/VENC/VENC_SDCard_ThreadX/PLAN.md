@@ -298,9 +298,41 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   **Nicht per CPU-Kopie:** die DCMIPP muss direkt dorthin schreiben. Die in (b)
   gemessene Stage-Kopie kostet **146,5 ms je Frame** (1,38 MB → 9,4 MB/s), weil
   beide Regionen uncached sind — sie war nur das Messmittel, nie der Vorschlag.
-- [ ] **M3 — Störpakete**: 0x12/0x2f-Pakete und permanenter IDERR korrumpieren
+- [x] **M3 — Störpakete**: 0x12/0x2f-Pakete und permanenter IDERR korrumpieren
   den Pipe1-Semiplanar-Capture nicht (im Preview bekannt harmlos; einmal im
-  Encoder-Setup verifizieren).
+  Encoder-Setup verifizieren). Neues Kommando `errors [s]`
+  (`VENC_APP_WatchErrors`): zählt über ein Fenster, was CSI-Empfänger, DCMIPP
+  und Encoder melden, während die Pipeline aufzeichnet.
+  **Ergebnis (je 120 s, NV12, Aufzeichnung auf SD, bei 2 und 10 Mbit/s):
+  bestätigt harmlos.**
+
+  | | 2 Mbit/s | 10 Mbit/s |
+  |---|---|---|
+  | `csi.id_err` | 11 847 von 11 848 Stichproben | 11 529 von 11 533 |
+  | `csi.ecc` / `crc` / `sync` / `spkt` / `watchdog` / `phy` | **je 0** | **je 0** |
+  | `dcmipp.pipe_errors` / `global_errors` | **0 / 0** | **0 / 0** |
+  | `fuse_errors` | **0** | **0** |
+
+  Der IDERR steht permanent an — er ist kein Ereignis, sondern ein Zustand —
+  und darunter bleibt über zwei Minuten alles still: kein Pipe-Overrun, kein
+  AXI-Fehler, keine DCMIPP/VENC-Desynchronisation. Die Störpakete beansprucht
+  weiterhin niemand, und der Semiplanar-Capture nimmt keinen Schaden.
+
+  **Was der Report sonst noch zeigt und was es nicht ist:** `ring_full` = 278
+  bzw. 1413, und in beiden Läufen ist `encode_errors` exakt dieselbe Zahl — das
+  heisst, *jeder* gezählte Encode-Fehler war ein voller Ausgangsring, keiner ein
+  Encoder-Fehler. Der SD-Pfad kommt bei den heutigen 49,7 fps aus einem
+  einzelnen VC nicht nach, bei 10 Mbit/s deutlich weniger als bei 2. Das ist
+  eine Durchsatzfrage, keine Korruption, und der Zielzustand entlastet sie: das
+  Composite läuft mit 24,8 fps, also rund 60 % der heutigen SD-Last
+  (1,24 statt 2,07 MB/s). Der SD-Pfad ist damit aber der nächste Kandidat für
+  den Engpass — er sollte in Phase 3 im Dauerlauf nachgemessen werden, nicht
+  angenommen.
+  Der Rest der Differenz zwischen `frames_received` (5961) und
+  `frames_encoded` (4416) sind Frames, die der Encoder nie gesehen hat: er
+  läuft bei 2 Mbit/s mit 36,8 fps an seiner Decke, und das Event-Flag der
+  Capture koaleszt, was in der Zwischenzeit ankommt. Auch das ist strukturell,
+  kein Fehler.
 
 ### Rohdaten der Messungen (2026-08-26, CsiProbe-Build)
 
@@ -422,6 +454,18 @@ AXISRAM-Lauf 164 ms statt 26 ms liegen, ist die Szene dort *stärker* verändert
 `stream_kbit_per_s` ist im (b)-Lauf niedrig (384), weil das Fenster die
 Stage-Kopien enthält; die Ratenregelung ist auf 30 fps konfiguriert, real kamen
 5,5 fps an. Für das Zeitmodell irrelevant, `us_per_mb` misst nur den Encode.
+
+M3 wird mit `errors [s]` gemessen, das die Pipeline laufend voraussetzt:
+
+```powershell
+./Tools/debug/csi-console.ps1 -Sequence "stop; format nv12; bitrate 10000000; record; start"
+./Tools/debug/csi-console.ps1 -Sequence "errors 120" -MaxSeconds 180
+```
+
+Die Zähler `csi.*` sind Polling-Stichproben, keine Pakete — nur ihre Anwesenheit
+und ihr Verhältnis zur Fensterlänge bedeuten etwas. SOF/EOF werden bewusst nicht
+gelöscht: die laufende Pipe hat ihren Interrupt-Handler auf denselben Flags, und
+ein Löschen von hier würde ihr Frames stehlen.
 
 **Die bewegte Szene** war ein Bildschirm mit laufendem Video vor der Kamera.
 Das ist der brauchbarere Aufbau: er bewegt sich gleichmässig und von selbst,

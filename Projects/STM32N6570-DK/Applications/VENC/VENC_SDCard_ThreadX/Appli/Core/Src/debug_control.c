@@ -225,6 +225,8 @@ static void handle_command(char *line)
            "                      the encoded output for the duration\n"
            "  sdbench [n]         SD write time over n frames (default 200);\n"
            "                      records to the card, unlike 'bench'\n"
+           "  errors [s]          CSI/DCMIPP/encoder error tally over s seconds\n"
+           "                      (default 60), pipeline must be running\n"
            "  record              keep encoded frames again\n"
            "  format yuyv|nv12    pixel packer and encoder input format\n"
            "  inbuf capture|axisram  where the encoder reads the picture from\n"
@@ -268,6 +270,21 @@ static void handle_command(char *line)
   else if (strncmp(line, "sdbench", 7) == 0)
   {
     run_sdbench(arg_u32(line, 0U, 200U));
+  }
+  else if (strncmp(line, "errors", 6) == 0)
+  {
+    VENC_APP_Status_t status;
+
+    VENC_APP_GetStatus(&status);
+    if (status.state != VENC_APP_PIPELINE_RUNNING)
+    {
+      printf("CTRL: 'start' first - the tally only means something while frames flow\n");
+    }
+    else
+    {
+      venc_bench_sd_reset();
+      VENC_APP_WatchErrors(arg_u32(line, 0U, 60U));
+    }
   }
   else if (strncmp(line, "bench", 5) == 0)
   {
