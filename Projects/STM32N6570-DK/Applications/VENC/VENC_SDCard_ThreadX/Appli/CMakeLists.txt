@@ -94,6 +94,26 @@ if(VENC_SMALL_BITSTREAM_RING)
     list(APPEND APP_Defines VENC_OUTPUT_BUFFER_SIZE=524288U)
 endif()
 
+# The composite geometry, as WIDTHxHEIGHT. The encode-time model used to be
+# taken at 720p and scaled by macroblock count, which assumes the shape of the
+# frame does not matter. After the composite was respecified from portrait to
+# landscape that assumption is exactly what needs measuring, so the geometry
+# became a build parameter and the encoder is configured at the real target
+# size (PLAN.md M2-R).
+#
+# The DCMIPP downsizes the 1920x1080 source into it, so neither dimension may
+# exceed the source - 1984 wide is not reachable and 1920x512 stands in for it
+# at the same macroblock count.
+set(VENC_GEOMETRY "" CACHE STRING "Encoder geometry as WIDTHxHEIGHT, empty for the config header default")
+
+if(VENC_GEOMETRY)
+    if(NOT VENC_GEOMETRY MATCHES "^([0-9]+)x([0-9]+)$")
+        message(FATAL_ERROR "VENC_GEOMETRY must look like 1792x448, got '${VENC_GEOMETRY}'")
+    endif()
+    list(APPEND APP_Defines VENC_GEOMETRY_WIDTH=${CMAKE_MATCH_1}U)
+    list(APPEND APP_Defines VENC_GEOMETRY_HEIGHT=${CMAKE_MATCH_2}U)
+endif()
+
 # --------------------------------------------------------------------------
 # Include paths
 # --------------------------------------------------------------------------

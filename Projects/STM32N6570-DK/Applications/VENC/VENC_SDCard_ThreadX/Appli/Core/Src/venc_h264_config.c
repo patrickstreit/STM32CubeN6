@@ -44,6 +44,19 @@
 #error "Undefined VENC configuration"
 #endif
 
+/* Geometry override from the build (-DVENC_GEOMETRY=1792x448). The config
+   headers above carry a fixed size each; the composite plan needs the encoder
+   configured at whatever the composite currently is, and after the respec from
+   portrait to landscape that is a value the measurement varies rather than a
+   constant. Everything derived from VENC_WIDTH/VENC_HEIGHT below - pitch,
+   input frame size, the encoder config - follows from here. */
+#if defined(VENC_GEOMETRY_WIDTH) && defined(VENC_GEOMETRY_HEIGHT)
+#undef VENC_WIDTH
+#define VENC_WIDTH   VENC_GEOMETRY_WIDTH
+#undef VENC_HEIGHT
+#define VENC_HEIGHT  VENC_GEOMETRY_HEIGHT
+#endif
+
 #ifndef DCMIPP_FORMAT
 #define DCMIPP_FORMAT            DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1
 #endif

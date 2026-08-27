@@ -20,8 +20,7 @@ extern DCMIPP_HandleTypeDef hcamera_dcmipp;
 
 #define MUX_DEFAULT_SECONDS   60U
 
-#define SEG_LUMA_SIZE     (CSI_MUX_SEG_W * CSI_MUX_SEG_H)
-#define COMPOSITE_LUMA    (SEG_LUMA_SIZE * CSI_MUX_SEGMENTS)
+#define COMPOSITE_LUMA    (CSI_MUX_COMPOSITE_W * CSI_MUX_SEG_H)
 #define COMPOSITE_SIZE    (COMPOSITE_LUMA + (COMPOSITE_LUMA / 2U))
 
 /* One composite NV12 frame. Not double-buffered: pairing two segments into a
@@ -66,7 +65,7 @@ typedef struct
   * @brief  Largest centred region of @p src_w x @p src_h with a segment's shape.
   * @note   Cropping to the segment aspect ratio first is what keeps the picture
   *         undistorted: the downsize block scales the two axes independently,
-  *         so squeezing 16:9 into a 1:2 segment without a crop would simply
+  *         so squeezing 16:9 into a 2:1 segment without a crop would simply
   *         stretch it.
   */
 static void mux_roi(uint32_t src_w, uint32_t src_h, mux_roi_t *roi)
@@ -93,10 +92,14 @@ static void mux_segment_addresses(void)
   uint32_t y_base  = (uint32_t)composite;
   uint32_t uv_base = y_base + COMPOSITE_LUMA;
 
+  /* Segments sit side by side, so a segment begins one column band into the
+     frame and the rest of its geometry comes from the pitch. The chroma plane
+     of NV12 is as wide as the luma plane and half as tall, so the same column
+     offset applies to it unchanged. */
   for (uint32_t k = 0U; k < CSI_MUX_SEGMENTS; k++)
   {
-    g_addr[k].YAddress  = y_base + (k * SEG_LUMA_SIZE);
-    g_addr[k].UVAddress = uv_base + (k * (SEG_LUMA_SIZE / 2U));
+    g_addr[k].YAddress  = y_base + (k * CSI_MUX_SEG_W);
+    g_addr[k].UVAddress = uv_base + (k * CSI_MUX_SEG_W);
   }
 }
 
@@ -151,7 +154,9 @@ static HAL_StatusTypeDef mux_configure_pipe1(const csi_preview_source_t *src, co
   /* The source dictates the frame rate; take every frame. */
   pipe.FrameRate         = DCMIPP_FRAME_RATE_ALL;
   pipe.PixelPackerFormat = DCMIPP_PIXEL_PACKER_FORMAT_YUV420_2;   /* NV12 */
-  pipe.PixelPipePitch    = CSI_MUX_SEG_W;
+  /* The composite width, not the segment width: after each line of a segment
+     the packer has to skip to the next line of the whole frame. */
+  pipe.PixelPipePitch    = CSI_MUX_COMPOSITE_W;
   if (HAL_DCMIPP_PIPE_SetConfig(&hcamera_dcmipp, DCMIPP_PIPE1, &pipe) != HAL_OK)
   {
     return HAL_ERROR;
@@ -311,14 +316,23 @@ void csi_mux_on_pipe1_frame(void)
 /** @brief Mean luma over a sample grid of one segment, as a sign of life. */
 static uint32_t segment_luma_mean(uint32_t segment)
 {
-  const uint8_t *y = &composite[segment * SEG_LUMA_SIZE];
+  const uint8_t *y   = &composite[segment * CSI_MUX_SEG_W];
   uint32_t       sum = 0U;
   uint32_t       n   = 0U;
 
-  for (uint32_t i = 0U; i < SEG_LUMA_SIZE; i += 331U)   /* prime stride: no row bias */
+  /* Row by row, because a segment is not a contiguous run any more: sampling
+     straight through memory would cross into the neighbouring segment every
+     SEG_W bytes and average the two together - which would make a segment that
+     is never written look alive. */
+  for (uint32_t row = 0U; row < CSI_MUX_SEG_H; row++)
   {
-    sum += y[i];
-    n++;
+    const uint8_t *line = y + ((uint32_t)row * CSI_MUX_COMPOSITE_W);
+
+    for (uint32_t i = 0U; i < CSI_MUX_SEG_W; i += 331U) /* prime stride: no column bias */
+    {
+      sum += line[i];
+      n++;
+    }
   }
   return (n == 0U) ? 0U : (sum / n);
 }
@@ -434,9 +448,9 @@ int csi_mux_run(const csi_preview_source_t *a, const csi_preview_source_t *b, ui
   printf("crop=%lux%lu+%lu+%lu\n", (unsigned long)roi.hsize, (unsigned long)roi.vsize,
          (unsigned long)roi.hstart, (unsigned long)roi.vstart);
   printf("segment=%ux%u\n", (unsigned)CSI_MUX_SEG_W, (unsigned)CSI_MUX_SEG_H);
-  printf("composite=%ux%u\n", (unsigned)CSI_MUX_SEG_W,
-         (unsigned)(CSI_MUX_SEG_H * CSI_MUX_SEGMENTS));
-  printf("format=NV12 pitch=%u\n", (unsigned)CSI_MUX_SEG_W);
+  printf("composite=%ux%u\n", (unsigned)CSI_MUX_COMPOSITE_W,
+         (unsigned)CSI_MUX_SEG_H);
+  printf("format=NV12 pitch=%u\n", (unsigned)CSI_MUX_COMPOSITE_W);
   printf("composite_base=0x%08lx\n", (unsigned long)composite);
   printf("composite_bytes=%lu\n", (unsigned long)COMPOSITE_SIZE);
 

@@ -51,6 +51,43 @@
             "cacheVariables": {
                 "VENC_BITSTREAM_IN_PSRAM": "ON"
             }
+        },
+        {
+            "name": "Geom1792x448",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_GEOMETRY": "1792x448"
+            }
+        },
+        {
+            "name": "Geom896x896",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_GEOMETRY": "896x896"
+            }
+        },
+        {
+            "name": "Geom1920x512",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_GEOMETRY": "1920x512"
+            }
+        },
+        {
+            "name": "Geom1792x448Axi",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_GEOMETRY": "1792x448",
+                "VENC_M2_AXISRAM_INPUT": "ON"
+            }
+        },
+        {
+            "name": "Geom1920x512Axi",
+            "inherits": "Debug",
+            "cacheVariables": {
+                "VENC_GEOMETRY": "1920x512",
+                "VENC_M2_AXISRAM_INPUT": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -77,6 +114,26 @@
         {
             "name": "DebugBitstreamPsram",
             "configurePreset": "DebugBitstreamPsram"
+        },
+        {
+            "name": "Geom1792x448",
+            "configurePreset": "Geom1792x448"
+        },
+        {
+            "name": "Geom896x896",
+            "configurePreset": "Geom896x896"
+        },
+        {
+            "name": "Geom1920x512",
+            "configurePreset": "Geom1920x512"
+        },
+        {
+            "name": "Geom1792x448Axi",
+            "configurePreset": "Geom1792x448Axi"
+        },
+        {
+            "name": "Geom1920x512Axi",
+            "configurePreset": "Geom1920x512Axi"
         }
     ]
 }

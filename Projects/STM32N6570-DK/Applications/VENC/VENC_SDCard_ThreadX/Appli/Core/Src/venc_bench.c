@@ -20,15 +20,29 @@
 
 #include "venc_bench.h"
 
-/* The composite the measurement is taken for: 448 x 1792, 28 x 112 macroblocks.
+/* The composite the projection below is taken for: 4 segments of 448 x 448
+   side by side, 1792 x 448 = 112 x 28 = 3136 macroblocks. The respec from
+   portrait to landscape left this number untouched - same segments, same
+   count, rotated - which is why the projection survived it and only the
+   question whether the *shape* costs anything had to be measured again.
    Kept here rather than derived from a header so this stays readable next to
    the projection it feeds. */
 #define COMPOSITE_MACROBLOCKS   3136U
 
-/* One 720p frame in the widest format this build captures. NV12 needs 1.5
-   bytes per pixel; YUYV would need 2 and does not fit next to the bitstream
-   buffer in AXISRAM, which is the whole reason the staging buffer exists. */
-#define STAGE_FRAME_SIZE        ((1280U * 720U * 3U) / 2U)
+/* One frame at the configured geometry, in the widest format this build
+   captures. NV12 needs 1.5 bytes per pixel; YUYV would need 2 and does not fit
+   next to the bitstream buffer in AXISRAM, which is the whole reason the
+   staging buffer exists. Derived from the geometry rather than pinned to 720p:
+   the encode-time model is taken at several frame sizes now (PLAN.md M2-R) and
+   a fixed 720p buffer would silently truncate the larger ones. */
+#if defined(VENC_GEOMETRY_WIDTH) && defined(VENC_GEOMETRY_HEIGHT)
+#define STAGE_FRAME_W           VENC_GEOMETRY_WIDTH
+#define STAGE_FRAME_H           VENC_GEOMETRY_HEIGHT
+#else
+#define STAGE_FRAME_W           1280U
+#define STAGE_FRAME_H           720U
+#endif
+#define STAGE_FRAME_SIZE        ((STAGE_FRAME_W * STAGE_FRAME_H * 3U) / 2U)
 
 #if defined(VENC_M2_AXISRAM_INPUT)
 /* AXISRAM, non-cacheable - the same attributes the DCMIPP destination has, so

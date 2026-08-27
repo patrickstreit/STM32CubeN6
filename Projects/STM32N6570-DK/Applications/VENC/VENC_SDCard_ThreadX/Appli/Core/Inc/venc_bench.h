@@ -7,8 +7,16 @@
   * ------------------------------------
   * The only number the composite plan needs from the encoder is how long
   * H264EncStrmEncode() takes per macroblock, because that is what decides which
-  * frame rate a 448x1792 composite can be sustained at. So that call, and
+  * frame rate a 1792x448 composite can be sustained at. So that call, and
   * nothing around it, is what gets timed.
+  *
+  * The geometry is a build parameter (-DVENC_GEOMETRY=1792x448). It used to be
+  * fixed at 720p and the composite time was scaled from there by macroblock
+  * count - which assumes the shape of the frame is free. Once the composite was
+  * respecified from portrait to landscape that assumption was the thing under
+  * test, so the encoder is now configured at the geometry being measured and
+  * the number is a measurement rather than a projection. It came out true:
+  * 1792x448 and 896x896 have the same macroblock count and are 0.7 % apart.
   *
   * The frames come from the live camera rather than from a still picture held
   * in memory. Encoding the same picture over and over would make every inter

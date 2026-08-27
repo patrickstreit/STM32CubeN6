@@ -19,17 +19,34 @@
   * runs against the buffer geometry that has to work in the end, not a
   * convenient stand-in.
   *
-  * The composite is a column of segments: segment k holds its luma at
-  * k * SEG_W * SEG_H and its chroma at the corresponding offset in the chroma
-  * plane, so the whole thing is one plain NV12 frame of SEG_W x (SEG_H * n).
+  * The composite is a row of segments: segment k occupies the columns
+  * [k * SEG_W, (k+1) * SEG_W) of one NV12 frame of (SEG_W * n) x SEG_H.
   *
-  * Segment width
-  * -------------
-  * PLAN.md sizes a segment 440 wide. The pixel packer cannot do that: its pitch
-  * register is a byte count that the hardware requires to be a multiple of 16
-  * (the HAL asserts (PITCH & 0xF) == 0), and 440 is not. 448 is, it is also a
-  * whole number of macroblocks, which removes the padding column the plan had
-  * to account for, and it costs 1.8 % more macroblocks.
+  * That row, rather than the column this used to be, is what makes the pixel
+  * packer pitch load-bearing. Stacked segments are contiguous - each one is a
+  * plain run of memory and the pitch equals the segment width - so switching
+  * channels was nothing but an address flip. Side by side, every segment is a
+  * window into a wider frame: the pitch has to be the *composite* width while
+  * the downsizer still emits SEG_W pixels per line, and the write pointer
+  * jumps by pitch - SEG_W bytes at the end of each one. The hardware does that
+  * without help (P1PPM0PR/P1PPM1PR are byte counts independent of the captured
+  * width, and the HAL programs the same value into both for NV12), but it is
+  * the one part of the mechanism the stacked layout never exercised, which is
+  * why M1 is taken again in this geometry.
+  *
+  * Segment size
+  * ------------
+  * 896 x 448 per channel, composite 1792 x 448. Two channels here stand in for
+  * the four of 448 x 448 the final design has: same composite, same pitch, same
+  * macroblock count, and the switching mechanism does not care how many
+  * segments it cycles through.
+  *
+  * The pixel packer pitch is a byte count the hardware requires to be a
+  * multiple of 16 (the HAL asserts (PITCH & 0xF) == 0, and the asserts are off
+  * in this build, so a bad value lands in the register silently). It is now the
+  * composite width rather than the segment width, so it is 1792 that has to
+  * satisfy it - which it does, as do the segment offsets 0 and 896 that the
+  * destination addresses are stepped by.
   ******************************************************************************
   */
 
@@ -46,11 +63,14 @@ extern "C" {
 #endif
 
 /** Width of one composite segment, in pixels. A multiple of 16 - see above. */
-#define CSI_MUX_SEG_W        448U
+#define CSI_MUX_SEG_W        896U
 /** Height of one composite segment, in lines. */
-#define CSI_MUX_SEG_H        896U
+#define CSI_MUX_SEG_H        448U
 /** Segments in the composite; one per virtual channel being captured. */
 #define CSI_MUX_SEGMENTS       2U
+
+/** Width of the whole composite, in pixels - and its NV12 pitch, in bytes. */
+#define CSI_MUX_COMPOSITE_W  (CSI_MUX_SEG_W * CSI_MUX_SEGMENTS)
 
 /**
   * @brief  Capture @p a and @p b alternately into the composite for @p seconds,

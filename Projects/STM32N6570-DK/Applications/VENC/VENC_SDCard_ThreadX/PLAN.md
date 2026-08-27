@@ -15,24 +15,72 @@ der alten Notiz stammen aus einem 500-ms-Fenster, M0 misst die Frameperiode zu
 (Demosaic RGGB + CSC + Downsize) → VENC 720p30 YUYV → FileX/SD @2 Mbit/s;
 Trace: ~27 ms/720p-Frame.
 
-Ziel: beide Kameras aufzeichnen, 25–30 fps/Kamera bei ≥440×880, Bitrate
-10 Mbit/s, möglichst kein Frame-Verlust am Input. **Nach M0/M1 erreichbar sind
-24,8 fps/Kamera** — die Quelle verschachtelt beide Kanäle, mehr als die Hälfte
-ihrer 49,64 fps ist mit einer zeitgeteilten Pipe nicht zu holen. Die 25-fps-
-Untergrenze wird also um 0,2 fps verfehlt; wer sie braucht, muss die Quellrate
-anheben oder auf CrossLink-Variante C (siehe Ausbaustufe).
+### Zielvorgabe (Stand 2026-08-27, korrigiert)
 
-Entschieden: **Composite-Stream 448×1792, eine Encoder-Instanz.** Die
-Kamerabilder liegen als Segmente in einem Frame: heute 2×448×896 (Segment k bei
-Y-Offset k·448·896, UV analog, NV12-Pitch = 448), später **4 VCs à 448×448 bei
-identischer Gesamtauflösung 448×1792** — Buffer-Layout bleibt gleich.
+**Das Composite ist Breitformat, nicht hochkant.** Die frühere Annahme
+448×1792 (Segmente übereinander) war eine Fehlspezifikation; richtig ist
+**1792×448** mit den Segmenten nebeneinander.
+
+Endausbau: **4 Sensoren à mindestens 448×448 bei 30 fps** → Composite
+**1792×448**. Der Zweisensor-Aufbau auf dem Tisch bildet dasselbe Composite mit
+**2 Segmenten à 896×448** ab — gleiche Gesamtauflösung, gleicher Pitch, gleiche
+Makroblockzahl, nur eine andere Segmentbreite. Geprüft werden soll ausserdem, ob
+**496×496** je Sensor (Composite 1984×496) noch Marge hat.
+
+Bitrate 10 Mbit/s, möglichst kein Frame-Verlust am Input.
+
+**Was sich dadurch ändert — Kurzfassung** (Herleitung in M2-R und in der
+Ausbaustufe):
+
+| | alt (448×1792, 2 Sensoren, 24,8 fps) | neu (1792×448, 4 Sensoren, 30 fps) |
+|---|---|---|
+| Makroblöcke | 3136 | 3136 — **unverändert** |
+| Encode-Zeit/Frame | 20,8 ms (hochgerechnet) | **21,3 ms (gemessen)** |
+| Budget je Frame | 40,3 ms → 52 % | 33,3 ms → **64 %** |
+| Speicher | Ping-Pong + Ring = NOCACHE exakt | **unverändert**, Bytes identisch |
+| Segment im Speicher | zusammenhängend, reiner Adress-Flip | **Fenster in breiterem Frame**, Pitch ≠ Breite |
+| Capture-Rate | 24,8 fps (= Quelle/2) | **12,4 fps** (= Quelle/4) → **Ziel verfehlt** |
+
+Die ersten vier Zeilen sind unkritisch. Die fünfte ist ein kleiner
+Mechanikwechsel in der Capture-Konfiguration, in M1-R auf der Hardware belegt.
+**Die sechste ist der eigentliche Bruch:** 30 fps aus vier zeitgeteilten VCs
+verlangt eine Quellrate von 120 fps je Kanal; die Quelle liefert 49,64. Damit ist **CrossLink-Variante C
+(FPGA-Composite) keine Ausbaustufe mehr, sondern Voraussetzung** — siehe
+Ausbaustufe und den Vermerk beim GATE.
+
+*Historisch (alte Zielvorgabe, von M0/M1 beantwortet):* 25–30 fps/Kamera bei
+≥440×880, zwei Kameras. Erreichbar waren **24,8 fps/Kamera** — die Quelle
+verschachtelt beide Kanäle, mehr als die Hälfte ihrer 49,64 fps ist mit einer
+zeitgeteilten Pipe nicht zu holen.
+
+Entschieden: **Composite-Stream 1792×448, eine Encoder-Instanz.** Die
+Kamerabilder liegen als Segmente **nebeneinander** in einem Frame: heute
+2×896×448 (Segment k in den Spalten [k·896, (k+1)·896), UV analog, NV12-Pitch =
+1792), später **4 VCs à 448×448 bei identischer Gesamtauflösung 1792×448** —
+Buffer-Layout und Bytezahl bleiben gleich.
+
+**Was die Drehung an der Capture-Konfiguration ändert.** Übereinander gestapelt
+war jedes Segment ein zusammenhängender Speicherblock; Pitch = Segmentbreite,
+und der Kanalwechsel war nichts als ein Adress-Flip. Nebeneinander ist jedes
+Segment ein **Fenster in einem breiteren Frame**: der Pitch muss die
+*Composite*-Breite tragen (1792), während der Downsizer weiterhin nur 896 (bzw.
+448) Pixel je Zeile liefert, und die Zieladresse von Segment k beginnt k·896
+Bytes weiter rechts. Die Hardware kann das ohne Zutun — `P1PPM0PR`/`P1PPM1PR`
+sind Bytezähler unabhängig von der aufgenommenen Breite, und die HAL schreibt
+für YUV420_2 denselben Wert in beide, was für NV12 genau richtig ist (die
+Chroma-Ebene ist so breit wie die Luma-Ebene und halb so hoch, der
+Spalten-Offset ist derselbe). Es ist aber der eine Teil der Mechanik, den M1 in
+der gestapelten Fassung nie ausgeübt hat → **M1-R**.
+
 **Korrektur aus M1: 440 geht nicht.** Der Pixel-Packer-Pitch ist ein Bytewert,
 den die Hardware auf ein Vielfaches von 16 festlegt (`IS_DCMIPP_PIXEL_PIPE_PITCH`
-prüft `(PITCH & 0xF) == 0`; die Asserts sind im Build aus, der Wert landete also
-still falsch im Register). 448 erfüllt das, ist zugleich ein glattes Vielfaches
-von 16 Pixeln und macht die Padding-Spalte überflüssig.
-Performance-Check: 448×1792 = 28×112 = 3136 Makroblöcke, +4 % ggü. 880×880 —
-vernachlässigbar. Gemeinsames ISP-Tuning für beide Kameras; Crop/Downsize im
+prüft `(PITCH & 0xF) == 0` und `<= 0x7FFF`; die Asserts sind im Build aus, der
+Wert landete also still falsch im Register). Diese Bedingung trifft jetzt die
+Composite-Breite: 1792 erfüllt sie, ebenso die Segment-Offsets 0/896 bzw.
+0/448/896/1344 — und für die 496er-Variante auch 1984 und 0/496/992/1488.
+Performance-Check: 1792×448 = 112×28 = 3136 Makroblöcke — dieselbe Zahl wie
+gestapelt, die Drehung kostet also von vornherein nichts, und M2-R bestätigt
+das gemessen. Gemeinsames ISP-Tuning für beide Kameras; Crop/Downsize im
 DCMIPP (kein CrossLink-Build für den Einstieg).
 
 ### Die entscheidende Unbekannte (→ M0)
@@ -68,7 +116,8 @@ strukturell, nicht implementierungsbedingt.
   Memory-Bandbreite als Bottleneck; „VENC liest Chroma doppelt → ø 16 bpp
   Input-Traffic".
 - Encode-Zeit-Hebel — **von M2 auf zwei zusammengeschrumpft**: Auflösung
-  (448×1792 = 3136 MBs → gemessen 20,8 ms bei 6,6 µs/MB am Zielbetriebspunkt)
+  (1792×448 = 3136 MBs → M2-R misst 21,3 ms bei 6,80 µs/MB am
+  Zielbetriebspunkt, aus AXISRAM 15,4 ms bei 4,90 µs/MB)
   und **Input-Buffer AXISRAM statt uncached PSRAM (−31 %, auf beiden gemessenen
   Szenen)**. NV12 statt YUYV, `enableCabac=2` (offiziell „Performance
   optimized": Intra CAVLC / Inter CABAC) und `transform8x8Mode=0` liegen alle
@@ -78,12 +127,14 @@ strukturell, nicht implementierungsbedingt.
   ist schneller als 2 Mbit/s, statisch um 11 %, auf bewegtem Bild noch um 3 %.
   10 Mbit/s ist also nicht nur unkritisch (API bis 40 Mbit/s, Level 4.1 reicht),
   sondern der günstigere Betriebspunkt.
-- Budget: 448×1792@25 ≈ 59 % VENC-Auslastung → Luft bis ~30 fps Composite. Nach
-  M1 liegt die Composite-Rate bei 24,8 fps (ein Composite = je ein Segment pro
-  Kanal), also im günstigen Ast dieser Rechnung.
-  **4 Sensoren: Gesamtauflösung bleibt 448×1792 → VENC-Budget unverändert**;
-  limitierend ist nur die Capture-Seite (verschachtelt, durch M0 bestätigt:
-  ~fps/4 pro Kamera, also ~12,4 fps).
+- Budget bei der Zielrate 30 fps (33,3 ms/Frame): 1792×448 kostet **21,3 ms
+  → 64 %** aus PSRAM, **15,4 ms → 46 %** aus AXISRAM (M2-R, gemessen an der
+  echten Geometrie). **Die Form des Frames kostet nichts**: 896×896 mit
+  derselben Makroblockzahl liegt 0,7 % daneben.
+  **4 Sensoren: Gesamtauflösung bleibt 1792×448 → VENC-Budget unverändert**;
+  limitierend ist allein die Capture-Seite (verschachtelt, durch M0 bestätigt:
+  Quellrate/4, also ~12,4 fps — die 30-fps-Vorgabe verfehlt das um Faktor 2,4
+  und verlangt CrossLink-Variante C).
 - HW-Handshake (Slice-Mode) ist mit VC-Zeitmultiplex inkompatibel (one-way
   `venc_rdy`, FUSE_ERROR, Errata ES0620 §2.2.14) → Frame-Mode.
 - Bildqualität: Encoder-Pfad hat weder BLC noch Gain noch CCM → „washed out"
@@ -92,7 +143,7 @@ strukturell, nicht implementierungsbedingt.
   **Linkerscript korrigiert** (deklarierte vorher 16 MB; die oberen 16 MB sind
   am Board verifiziert, Schreibzugriffe bei +16 MB und +32 MB−16 bleiben stehen
   und aliasen nicht auf 0x90000000). EWL-Pool 8 MB PSRAM.
-  **Aufteilung nach M2 endgültig:** Composite-NV12 448×1792 = 1,20 MB im
+  **Aufteilung nach M2 endgültig:** Composite-NV12 1792×448 = 1,20 MB im
   Ping-Pong (2,41 MB) *und* der Bitstream-Ring (427 KB) in AXISRAM, zusammen
   exakt die 2,77 MB. Der Ring muss dorthin, weil der **SDMMC-DMA nicht aus
   PSRAM lesen kann** (Transfers werden angenommen, aber ein Teil schliesst nie
@@ -144,6 +195,46 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   also ~380 µs Reserve. Die Switch-Latenz ist nicht der Engpass, die
   Verschachtelung der Quelle ist es. Beide Segmente tragen echtes Bild
   (Luma-Mittel 122 bzw. 148, zwei verschiedene Kameras).
+- [x] **M1-R — derselbe Capture in der Breitformat-Geometrie** (2026-08-27,
+  `mux 0 1 60`). Die Drehung macht aus jedem Segment ein **Fenster in einem
+  breiteren Frame**: Pitch = 1792 gegen einen 896 Pixel breiten Capture, und
+  Segment 1 beginnt 896 Bytes weiter rechts statt ein ganzes Segment weiter
+  hinten. Genau diesen Fall hat die gestapelte Fassung nie ausgeübt, deshalb
+  M1 noch einmal.
+
+  **Die Adressen im Report zeigen die Geometrie direkt:**
+  `crop=1920x960+0+60` → `segment=896x448` → `composite=1792x448`,
+  `pitch=1792`, `composite_bytes=1204224`. Y-Basis 0x906bb800, Segment 1 bei
+  0x906bbb80 — **Abstand 0x380 = 896 Bytes**, also eine Spaltenverschiebung und
+  kein Segmentsprung. Chroma genauso: 0x9077f800 / 0x9077fb80, ebenfalls 896
+  auseinander, und die Chroma-Ebene beginnt 0xC4000 = 1792·448 nach der
+  Luma-Ebene. Das ist Zeile für Zeile das NV12-Layout, das der Encoder erwartet.
+
+  **Ergebnis, gegen M1 gehalten:**
+
+  | | M1 (448×1792, gestapelt) | M1-R (1792×448, nebeneinander) |
+  |---|---|---|
+  | VC0 / VC1 captured | 24,82 / 24,80 fps | **24,85 / 24,85 fps** |
+  | Keep-Rate | 50,00 % / 49,96 % | **50,00 % / 50,00 %** |
+  | `vc_mismatch` | 0 | **0** |
+  | Pipe-Overruns | 0 | **0** |
+  | ISR-Switch | 0,3 µs avg (max 0,9) | **0,3 µs avg (max 1,1)** |
+  | EOF → Switch vollzogen | 5,7 µs avg (max 6,0) | **5,8 µs avg (max 6,0)** |
+  | Luma-Mittel je Segment | 122 / 148 | **96 / 83** |
+
+  Nichts bewegt sich. 2986 Pipe-Frames in 2986 Quell-Frameperioden über 60,06 s,
+  `eof_unassociated=0`, `p1cfscr` = `p1fscr` = 0x2b. **Der Pixel-Packer schreibt
+  in ein Fenster genauso zuverlässig wie in einen zusammenhängenden Block**, und
+  die Switch-Mechanik interessiert das nicht.
+
+  *Zum Luma-Mittel:* die beiden Werte sind unterschiedlich (96 gegen 83) und
+  beide plausibel — zwei Kameras auf dieselbe Szene. Der Prüfer musste dafür
+  umgebaut werden: er lief vorher gerade durch den Speicher, was nebeneinander
+  liegende Segmente ineinander mitteln würde und ein nie beschriebenes Segment
+  lebendig aussehen liesse. Jetzt tastet er zeilenweise innerhalb des Fensters
+  ab. Dass zwei verschiedene Werte herauskommen, ist deshalb ein Beleg, dass
+  die Segmente sich nicht überlappen.
+
 - [x] **GATE (User-Entscheid): 24,8 fps/Kamera sind akzeptiert** (Patrick,
   2026-08-26). Die ursprüngliche Bedingung greift nicht: sie war an „M0/M1
   zeigen serielle Frames" geknüpft, die Quelle ist verschachtelt, und die
@@ -156,6 +247,13 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   CrossLink-Variante C (FPGA-Composite) erreichbar; das ist damit vertagt, nicht
   verworfen — spätestens bei 4 Sensoren (~12,4 fps/Kamera) kommt die Frage
   wieder.
+  > **Überholt durch die korrigierte Zielvorgabe vom 2026-08-27.** Der Entscheid
+  > galt für zwei Sensoren und eine 25-fps-Untergrenze; dort fehlten 0,2 fps.
+  > Die neue Vorgabe lautet 4 Sensoren bei 30 fps, und dieselbe Mechanik liefert
+  > dann 12,4 fps — kein Rundungsfehler mehr, sondern ein Faktor 2,4. Die
+  > Zustimmung deckt den Endausbau also nicht ab; „bei 4 Sensoren kommt die
+  > Frage wieder" ist eingetreten. Siehe Ausbaustufe: Variante C wird damit
+  > Voraussetzung.
 - [x] **M2 — VENC-Zeitmodell** (Encoder-Build, neues Kommando `bench [n]` plus
   `cfg`/`format`/`inbuf`/`cabac`/`t8x8`/`bitrate`, `Appli/Core/Src/venc_bench.c`):
   Baseline 720p YUYV (~27 ms), dann einzeln: (a) NV12
@@ -173,7 +271,7 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   Durchläufen, bewegt 200 Frames; (b) 60 Frames, weil die Stage-Kopie den Lauf
   auf 5,5 fps drückt):**
 
-  | Variante | statisch (P1 / P2) | bewegt | 448×1792 bewegt | max. Composite-Rate |
+  | Variante | statisch (P1 / P2) | bewegt | 3136 MBs, bewegt | max. Composite-Rate |
   |---|---|---|---|---|
   | Baseline YUYV, cabac=1, t8x8=1, 2 Mbit/s | 7,24 / 7,19 | 6,85 | 21,5 ms | 46,6 fps |
   | (a) NV12 | (7,59) / 7,07 | 6,83 | 21,4 ms | 46,7 fps |
@@ -215,7 +313,11 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
      teurer — die Recherche-Erwartung „höhere Bitrate kostet Zeit" ist damit
      auf beiden Szenen widerlegt.
 
-  **Antwort auf die Planfrage:** 448×1792 passt bei 24,8 fps mit grossem
+  *Die Spalte „3136 MBs" ist eine Hochrechnung aus µs/MB. **M2-R misst sie
+  direkt** — an der echten Geometrie und nach der Korrektur auf Breitformat;
+  die Hochrechnung hält (21,3 statt 20,8 ms, Differenz szenenbedingt).*
+
+  **Antwort auf die Planfrage:** das Composite passt bei 24,8 fps mit grossem
   Abstand. Budget 40,3 ms/Frame; am Zielbetriebspunkt (10 Mbit/s, bewegte
   Szene) sind es 20,8 ms → **52 % Auslastung**, über alle gemessenen Varianten
   und beide Szenen nie mehr als 22,9 ms → 57 %. Selbst 30 fps (33,3 ms) und
@@ -270,12 +372,14 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   umgesetzt, nur notiert.
 
   **Speicherbudget der NOCACHE-Region (2769K = 2 835 456 B):**
+  (Die Bytezahlen sind von der Drehung auf Breitformat unberührt — 448×1792 und
+  1792×448 belegen dasselbe.)
 
   | Belegung | Bedarf | passt |
   |---|---|---|
-  | Composite NV12 448×1792, einfach | 1 204 224 B | ja, 1,55 MB frei |
+  | Composite NV12 1792×448, einfach | 1 204 224 B | ja, 1,55 MB frei |
   | Composite NV12, **Ping-Pong (2×)** | 2 408 448 B | **ja**, 427 KB frei |
-  | Composite YUYV 448×1792, einfach | 1 605 632 B | ja, 1,17 MB frei |
+  | Composite YUYV 1792×448, einfach | 1 605 632 B | ja, 1,17 MB frei |
   | Composite YUYV, Ping-Pong (2×) | 3 211 264 B | **nein**, 376 KB zu viel |
 
   Das entscheidet die Formatfrage: **NV12, weil nur damit Ping-Pong in AXISRAM
@@ -333,6 +437,102 @@ die Auswertung skriptbar ist. Zusätzlich TraceX-Events (neue Instr-IDs in
   läuft bei 2 Mbit/s mit 36,8 fps an seiner Decke, und das Event-Flag der
   Capture koaleszt, was in der Zwischenzeit ankommt. Auch das ist strukturell,
   kein Fehler.
+
+- [x] **M2-R — Zeitmodell an der korrigierten Geometrie** (2026-08-27). Die
+  Zielvorgabe wurde auf Breitformat und 30 fps korrigiert; M2 hatte die
+  Composite-Zeit aus 720p über die Makroblockzahl hochgerechnet, was
+  stillschweigend annimmt, dass die *Form* des Frames nichts kostet. Genau das
+  war zu prüfen. Die Geometrie ist dafür ein Build-Parameter geworden
+  (`-DVENC_GEOMETRY=1792x448`, Presets `Geom*`), der Encoder wird also
+  tatsächlich auf die Zielgrösse konfiguriert und die DCMIPP skaliert die
+  Quelle hinein — gemessen statt gerechnet.
+
+  Alle Läufe direkt hintereinander gegen dieselbe Szene, NV12, `cabac=1`,
+  `t8x8=1`, **10 Mbit/s** (der Zielbetriebspunkt), Ausgabe verworfen; 720p an
+  beiden Enden als Klammer.
+
+  | Geometrie | MBs | aus PSRAM | ms/Frame | aus AXISRAM | ms/Frame |
+  |---|---|---|---|---|---|
+  | 1280×720 (Referenz, Klammer) | 3600 | 6,97 µs/MB | 25,11 | 4,89 µs/MB | 17,62 |
+  | **1792×448 — die Zielgeometrie** | 3136 | **6,80 µs/MB** | **21,33** | **4,90 µs/MB** | **15,37** |
+  | 896×896 (Formkontrolle, gleiche MBs) | 3136 | 6,85 µs/MB | 21,48 | — | — |
+  | 1920×512 (≙ 1984×496, s. u.) | 3840 | 6,94 µs/MB | 26,69 | 4,90 µs/MB | 18,82 |
+
+  **1. Die Form kostet nichts.** 1792×448 und 896×896 haben dieselben 3136
+  Makroblöcke und liegen 0,7 % auseinander — das ist Laufstreuung. Die Drehung
+  von hochkant auf breit war damit für den Encoder ein Nicht-Ereignis, und die
+  Hochrechnung aus M2 (20,8 ms) trifft die jetzt direkt gemessenen 21,3 ms auf
+  2 % genau; der Rest ist die Szene.
+
+  **2. Die Makroblockzahl trägt das Modell.** Aus AXISRAM sind es über alle
+  drei Geometrien 4,89 / 4,90 / 4,90 µs/MB — auf drei Stellen unbewegt. Aus
+  PSRAM streut es leicht (6,80–6,97), weil dort die Speicheranbindung
+  mitspricht und nicht nur die Rechenarbeit.
+  Die Klammer trägt das: 720p misst am Anfang der Serie 6,97 µs/MB und am Ende
+  6,98 — 0,14 % Drift über alle acht Läufe. Was zwischen den Geometrien steht,
+  ist also die Geometrie und nicht die Szene.
+
+  **3. Das Budget bei 30 fps (33,3 ms/Frame):**
+
+  | Composite | aus PSRAM | aus AXISRAM |
+  |---|---|---|
+  | 1792×448 (4× 448×448) | 21,3 ms → **64 %** | 15,4 ms → **46 %** |
+  | 1984×496 (4× 496×496) | 26,7 ms → **80 %** | 18,8 ms → **57 %** |
+
+  Beides passt, auch aus PSRAM. Der Vorbehalt aus M2 gilt unverändert: eine
+  detailreichere Einsatzszene kostet mehr, und bei 80 % ist der Puffer schon
+  dünn — 496 sollte deshalb nicht aus PSRAM encodiert werden.
+
+  **Warum 1920×512 und nicht 1984×496:** die DCMIPP kann nur verkleinern, und
+  die Quelle ist 1920 breit — 1984 ist von hier aus nicht herstellbar.
+  1920×512 = 3840 Makroblöcke liegt 0,1 % neben den 3844 von 1984×496, ist also
+  ein genauer Stellvertreter für das, was zählt.
+
+- [x] **M2-R Speicher — 448 ist die Obergrenze, 496 nur mit Umbau.** Die
+  Encode-Zeit erlaubt 496×496; der Speicher tut es nicht. NOCACHE-Region =
+  2 835 456 B, Composite-NV12 = Breite·Höhe·1,5, Ping-Pong = zweimal das:
+
+  | Segment (4 Sensoren) | Composite | MBs | NV12/Frame | Ping-Pong | + Ring 427 KB | passt |
+  |---|---|---|---|---|---|---|
+  | **448×448** | 1792×448 | 3136 | 1 204 224 B | 2 408 448 B | **2 835 456 B** | **ja, auf das Byte genau** |
+  | 480×480 | 1920×480 | 3600 | 1 382 400 B | 2 764 800 B | 3 191 808 B | nein (Ring passt nicht mehr) |
+  | 496×496 | 1984×496 | 3844 | 1 476 096 B | 2 952 192 B | 3 379 200 B | **nein** (schon der Ping-Pong ist 114 KB zu gross) |
+  | 512×512 | 2048×512 | 4096 | 1 572 864 B | 3 145 728 B | 3 572 736 B | nein |
+
+  Dass 448 exakt aufgeht, ist kein Zufall der Rundung, sondern die Grenze:
+  aus 12·N² + Ring ≤ 2 835 456 folgt N ≤ 448,0 bei heutigem Ring und N ≤ 486
+  selbst dann, wenn der Ring ganz verschwände — und verschwinden darf er nicht,
+  der SDMMC-DMA liest nicht aus PSRAM (siehe oben).
+
+  **Der Umbau, der 496 möglich machen würde.** Die NOCACHE-Region ist nicht
+  alles, was in AXISRAM liegt; davor stehen RO_Region und RW_Region, und beide
+  sind nur teilweise belegt (Debug-Build, aus dem Mapfile):
+
+  | Region | Länge | belegt | frei |
+  |---|---|---|---|
+  | RO_Region | 512 000 B | 309 696 B | 202 304 B |
+  | RW_Region | 583 680 B | 253 216 B | 330 464 B |
+  | **zusammen frei** | | | **532 768 B** |
+
+  Wandert dieser Platz ins Linkerscript-Segment NOCACHE, sind dort **3 368 224 B**
+  möglich. Damit passt 496×496 (2 952 192 Ping-Pong + 416 032 Ring — knapp unter
+  den heutigen 427 KB, also rund acht Frames Polster). **512×512 bliebe auch
+  dann aus:** der Ping-Pong liesse nur noch 222 KB Ring übrig, und der Rest des
+  Bilds hätte keinerlei Reserve mehr.
+
+  **Der Preis ist real:** danach hat weder der Code noch der Heap in AXISRAM
+  noch Luft, und die 532 KB sind eine Momentaufnahme dieses Builds — jede
+  Codezeile mehr knabbert daran. **Empfehlung: bei 448×448 bleiben**, solange
+  nicht jemand die 10 % mehr Kantenlänge ausdrücklich braucht. 448×448 passt
+  ohne jeden Eingriff, lässt 46 % VENC-Budget übrig und ist gegenüber dem
+  Endausbau ohnehin nicht das, was die Auflösung begrenzt — das ist die
+  Capture-Rate.
+
+  *Am Rand:* die SD-Last ändert sich durch die Auflösung nicht. Die Ratenregelung
+  arbeitet in Bit pro Sekunde, nicht pro Pixel — 10 Mbit/s bleiben 1,25 MB/s,
+  ob 448 oder 496. Wer bei 496 dieselbe Bildqualität je Pixel will, muss die
+  Bitrate um 23 % anheben (auf ~12,3 Mbit/s, 1,54 MB/s); der SD-Pfad trägt das
+  (gemessen 5,5 ms für ~50 KB aus AXISRAM).
 
 ### Rohdaten der Messungen (2026-08-26, CsiProbe-Build)
 
@@ -403,6 +603,31 @@ csi-README §4); das Sync-Bit stammt aus dem Kanal-Stopp am Ende von `probe`.
 über die 60 s nie übergelaufen. `errors 2000` direkt danach: id 0, ecc 0, crc 0,
 sync 0, phy 0 bei 100 Frames — der Link ist sauber.
 
+Derselbe Lauf nach der Drehung auf Breitformat (M1-R, 2026-08-27, gleicher
+Build-Preset `CsiProbe`, gleiche Kommandofolge):
+
+```
+=== MUX RESULT ===
+cpu_hz=800000000  window_ms=60064
+source=1920x1080  crop=1920x960+0+60  segment=896x448  composite=1792x448
+format=NV12 pitch=1792  composite_base=0x906bb800  composite_bytes=1204224
+seg0.vc=0  y=0x906bb800  uv=0x9077f800   seg1.vc=1  y=0x906bbb80  uv=0x9077fb80
+src.vc0.frames=2986  cap.vc0.frames=1493  drops=1493  keep=50.00 %  luma_mean=96
+src.vc1.frames=2986  cap.vc1.frames=1493  drops=1493  keep=50.00 %  luma_mean=83
+src.fps=49.71 je Kanal        cap.fps=24.85 / 24.85
+captured_total=2986           vc_mismatch=0      eof_unassociated=0
+isr_switch_us     min 0.3  avg 0.3  max 1.1   (n=2986)
+eof_to_switch_us  min 5.4  avg 5.8  max 6.0   (n=2986)
+p1fscr=0x0000002b  p1cfscr=0x0000002b
+dcmipp_error=0x00000900  csi_sr0=0x08183300
+=== END ===
+```
+
+Der Unterschied steht in den Adressen: die Segmente liegen jetzt **896 Bytes**
+auseinander statt ein ganzes Segment (0x62000), in Luma wie in Chroma, und der
+Pitch trägt die Composite-Breite. Alles andere — Raten, Drops, Switch-Latenz,
+`vc_mismatch`, `dcmipp_error` — ist innerhalb der Streuung identisch.
+
 Nicht gemacht: die im Plan zusätzlich vorgesehenen TraceX-Events. Die
 ISR-Latenzen stehen als min/avg/max im Konsolen-Report, dafür braucht es kein
 Perfetto; neue Instr-IDs wären erst nützlich, wenn Capture und Encoder im selben
@@ -440,6 +665,28 @@ max_fps_x100=5750       stream_kbytes=510        stream_kbit_per_s=384
 composite_mbs=3136      composite_us=15146       composite_max_fps_x100=6602
 === END ===
 ```
+
+**Für M2-R kommt die Geometrie dazu** (`-DVENC_GEOMETRY=WIDTHxHEIGHT`, Presets
+`Geom1792x448`, `Geom896x896`, `Geom1920x512` und die `…Axi`-Varianten mit
+AXISRAM-Input). Der Encoder wird damit auf die Zielgrösse konfiguriert und die
+DCMIPP skaliert die 1920×1080-Quelle hinein; grösser als die Quelle geht nicht,
+darum 1920×512 als Stellvertreter für 1984×496. Das Skript, das die Matrix
+abfährt, steht im Scratchpad (`m2r.ps1`) und flasht je Variante neu.
+
+Zwei Dinge, an denen die Automatisierung sonst scheitert:
+
+- **Die Quelle braucht nach jedem Board-Neustart einen Power-Cycle.** Ohne
+  `dutpower cycle` nach dem Flashen meldet jeder Lauf `frames=0` und
+  `CSI SR0=0x00060000` — das sieht nach einem Geometrieproblem aus und ist
+  keines; der CrossLink zieht den Link von sich aus nicht wieder hoch.
+- **`-IdleMs` funktioniert nicht mehr**, seit die Firmware sekündlich
+  `CPU Usage: …` schreibt: das Board wird nie still, jedes Kommando läuft in
+  `-MaxSeconds`. Stattdessen `-WaitFor` benutzen — `'VENC: \d+x\d+ .*bit/s'`
+  für die Konfigurationskommandos, `'=== END ==='` für `bench`.
+- **`stm32n6-gdb.ps1` über `cmd` aufrufen**, wenn ein PowerShell-Skript es
+  treibt. GDB schreibt auch im Erfolgsfall auf stderr, und PowerShell 5.1 macht
+  daraus einen abbrechenden `NativeCommandError`, der den Rest des Skripts
+  verschluckt.
 
 Zum Vergleich derselbe Lauf mit `inbuf capture`: `all.us_avg=25166`,
 `all.us_per_mb_x100=699`, `composite_max_fps_x100=4562`. Ein zweiter Durchlauf
@@ -502,12 +749,21 @@ Messziel:
 ## Phase 1 — Composite-Capture produktiv
 
 Dateien: `Appli/Core/Src/dcmipp_app.c`, `venc_app.c`, `venc_h264_config.*`
-(neue Config `venc_h264_config_448x1792_Frame.h`; **Segmentanzahl
-parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste ändert).
+(Geometrie über `-DVENC_GEOMETRY=1792x448`, seit M2-R ein Build-Parameter;
+**Segmentanzahl parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste
+ändert).
 
-- [ ] VC-Switch + Adress-Flip im Frame-Complete-ISR (beide VCs identische
-  Geometrie → nur VC-Feld + Semiplanar-Adressen wechseln, keine weitere
-  Pipe-Reconfig).
+> Bei CrossLink-Variante C entfällt dieser ganze Phasenblock: der FPGA liefert
+> das fertige Composite auf einem VC, Pipe1 nimmt jedes Frame, und Phase 2/3
+> bleiben unverändert. Nach der korrigierten Zielvorgabe ist C für den
+> Endausbau ohnehin Voraussetzung — Phase 1 ist damit der Weg für den
+> Zweisensor-Aufbau auf dem Tisch, nicht für das Produkt.
+
+- [ ] VC-Switch + Adress-/Pitch-Konfiguration im Frame-Complete-ISR (beide VCs
+  identische Geometrie → nur VC-Feld + Semiplanar-Adressen wechseln, keine
+  weitere Pipe-Reconfig). **Pitch = Composite-Breite (1792), nicht
+  Segmentbreite** — die Segmente liegen nebeneinander; Segment k beginnt
+  k·SEG_W Bytes weiter rechts, in beiden Ebenen. Mechanik in M1-R belegt.
 - [ ] Pairing-/Overflow-Logik: Composite komplett = alle Segmente desselben
   Ping-Pong-Slots gefüllt → `FRAME_RECEIVED_FLAG`; fehlt ein Segment, Inhalt
   des Vorgängers stehen lassen und Zähler tracen. `frame_received`/
@@ -515,10 +771,10 @@ parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste ändert).
 - [ ] LCD-Preview (Pipe2 shared) zeigt alternierende Segmente → deaktivieren
   oder als Debug-Ansicht dokumentieren.
 
-## Phase 2 — Encoder 448×1792 NV12 @ 10 Mbit/s
+## Phase 2 — Encoder 1792×448 NV12 @ 10 Mbit/s
 
-- [ ] `H264EncConfig`: 448×1792, `frameRate` = gemessene Composite-Rate (M1:
-  24,8 fps),
+- [ ] `H264EncConfig`: 1792×448, `frameRate` = Ziel-Composite-Rate (30 fps;
+  Variante A auf dem Tisch liefert 24,8 fps bei zwei Sensoren),
   Level 4.1, NV12-Preproc; Rate-Ctrl: `bitPerSecond=10_000_000`, `hrdCpbSize`
   anpassen, `gopLen` ≈ Framerate; Coding nach M2: `enableCabac` und
   `transform8x8Mode` bleiben auf den Defaults (1 / 1) — M2 hat gezeigt, dass
@@ -532,7 +788,7 @@ parametrisiert**, damit die 4-VC-Stufe nur die Segmentliste ändert).
   EWL-Pool bleiben in PSRAM — dort ist nach dem Linkerscript-Fix Platz, in
   AXISRAM nicht mehr. Linkerscript-Fix PSRAM 16→32 MB: **erledigt**.
 - [ ] Verifikation: Encode-Zeit-Trace; `H264ENC_FUSE_ERROR`-frei ≥10 min;
-  ffprobe/ffplay: 448×1792, Ziel-fps, ~10 Mbit/s.
+  ffprobe/ffplay: 1792×448, Ziel-fps, ~10 Mbit/s.
 
 ## Phase 3 — SD/Aufzeichnung
 
@@ -553,20 +809,59 @@ Aufwandsschätzung der Varianten (angefragt):
 
 | Variante | Nutzen | Aufwand/Risiko |
 |---|---|---|
-| A. N6-VC-Zeitmultiplex (dieser Plan) | **gemessen 24,8 fps/Kamera** (M0/M1), kein FPGA-Build | FW-Arbeit hier; Switch-Mechanik bewiesen und vermessen |
+| A. N6-VC-Zeitmultiplex (dieser Plan) | **gemessen 24,8 fps/Kamera** bei 2 Sensoren (M0/M1), kein FPGA-Build | FW-Arbeit hier; Switch-Mechanik bewiesen und vermessen. **Erreicht die neue Zielvorgabe nicht** (siehe unten) |
 | B. FPGA Frame-Interleave auf 1 VC | entlastet N6 (kein VC-Switch), gleicher Durchsatz wie A | ~1 Woche FPGA, kein Durchsatzgewinn → lohnt allein kaum |
-| C. FPGA Composite (Segmente in einem Frame) | volle Sensorrate, perfekte Paarung, drop-frei; **M0 zeigt „verschachtelt", damit ist dies der einzige Weg über 24,8 fps/Kamera hinaus** und ab 4 Sensoren (~12,4 fps/Kamera) voraussichtlich nötig | setzt Sensor-Genlock voraus (IMX258 ohne HW-Trigger → gemeinsamer Takt + gleichzeitiger I²C-Start vom CrossLink; Machbarkeit 1–2 Tage abklären). Ohne Genlock bräuchte der FPGA Full-Frame-Puffer (2,6 MB) > CrossLink-EBR. Implementierung grob 1–3 Wochen inkl. HW-Iterationen |
+| C. FPGA Composite (Segmente in einem Frame) | volle Sensorrate, perfekte Paarung, drop-frei; **die einzige Variante, die 4 Sensoren × 30 fps trägt** | setzt Sensor-Genlock voraus (IMX258 ohne HW-Trigger → gemeinsamer Takt + gleichzeitiger I²C-Start vom CrossLink; Machbarkeit 1–2 Tage abklären). Ohne Genlock bräuchte der FPGA Full-Frame-Puffer > CrossLink-EBR — bei 448×448-Segmenten allerdings nur noch ~300 KB je Kanal statt 2,6 MB, was die Frage neu stellt. Implementierung grob 1–3 Wochen inkl. HW-Iterationen |
+
+### Warum Variante C jetzt Voraussetzung ist, nicht Ausbaustufe
+
+Pipe1 ist der einzige Farbpfad und kann zu jedem Zeitpunkt genau einen VC
+aufnehmen. M0 hat gemessen, dass die Quelle die Kanäle **paketweise
+verschachtelt** überträgt — beide Frames laufen fast vollständig gleichzeitig
+über die Leitung. Während Pipe1 einen Kanal einfängt, ist der andere also nicht
+etwa noch nicht da, sondern bereits vorbei. Daraus folgt hart:
+
+> Composite-Rate = Quellrate ÷ Anzahl Sensoren.
+
+Bei 49,64 fps Quellrate:
+
+| Sensoren | Composite-Rate (Variante A) | Ziel 30 fps | nötige Quellrate für 30 fps |
+|---|---|---|---|
+| 2 | 24,8 fps (gemessen, M1) | verfehlt | 60 fps/Kanal |
+| 4 | **12,4 fps** | **um 59 % verfehlt** | **120 fps/Kanal** |
+
+Der VENC hat für 30 fps Luft (M2-R: 64 % Auslastung), der Speicher passt, die
+SD-Karte trägt es — **nur die Capture-Seite nicht**, und dort hilft keine
+Firmware-Arbeit: die Grenze steckt in der Quelle. Zwei Auswege, beide ausserhalb
+dieses Branches:
+
+1. **Quellrate anheben** auf 120 fps/Kanal. Bei 448×448-Segmenten ist das
+   datenratenseitig unkritisch (4 × 448×448 RAW10 × 120 fps ≈ 0,96 Gbit/s gegen
+   5 Gbit/s Link), hängt aber daran, ob IMX258 und CrossLink so konfigurierbar
+   sind. Offene Frage an den FPGA-/Sensor-Verantwortlichen.
+2. **Variante C.** Der FPGA setzt das Composite selbst zusammen und schickt es
+   als einen VC; Pipe1 nimmt dann jedes Frame und die Composite-Rate ist die
+   Sensorrate. 30 fps verlangt dann nur noch 30 fps aus den Sensoren.
 
 Die N6-Firmware wird so gebaut, dass die Capture-Seite austauschbar ist: der
 Composite-Buffer ist identisch, egal ob per VC-Multiplex oder später per
-FPGA-Composite befüllt. Sensor-Sync ist zugleich Voraussetzung für das spätere
-Ziel „Input-Rate = Encode-Rate ohne Drop".
+FPGA-Composite befüllt. Bei Variante C entfällt lediglich der VC-Switch aus
+Phase 1 — das Buffer-Layout, der Encoder und der SD-Pfad aus Phase 2/3 bleiben
+Zeile für Zeile dieselben. Sensor-Sync ist zugleich Voraussetzung für das
+spätere Ziel „Input-Rate = Encode-Rate ohne Drop".
 
 ## Verifikation (gesamt)
 
-1. M0–M3-Reports/Traces (Konsole + Perfetto) hier in PLAN.md eintragen.
+1. M0–M3- sowie M1-R-/M2-R-Reports/Traces (Konsole + Perfetto) hier in
+   PLAN.md eintragen.
 2. Phase 1: Zählerkonsistenz VC0/VC1/Composite über ≥60 s, keine unerklärten
-   Drops.
-3. Phase 2/3: 10-min-Aufnahme; ffprobe (Auflösung/fps/Bitrate); visuelle
-   Prüfung beider Segmente (Objektiv abdecken → nur ein Segment dunkel).
-4. Regressionscheck: Single-VC-720p-Build (bestehende Config) baut und läuft.
+   Drops. Zusätzlich seit der Drehung auf Breitformat: **die Segmente dürfen
+   sich im Bild nicht überlappen** — Pitch und Spalten-Offset sind die einzige
+   Stelle, an der ein Fehler ein plausibel aussehendes, aber falsches Bild
+   erzeugt (ein zu kleiner Pitch schreibt schräg, ein falscher Offset
+   überschreibt den Nachbarn).
+3. Phase 2/3: 10-min-Aufnahme; ffprobe (**1792×448**, Ziel-fps, Bitrate);
+   visuelle Prüfung aller Segmente (Objektiv abdecken → nur ein Segment
+   dunkel).
+4. Regressionscheck: Single-VC-720p-Build (Preset `Debug`, ohne
+   `VENC_GEOMETRY`) baut und läuft.
