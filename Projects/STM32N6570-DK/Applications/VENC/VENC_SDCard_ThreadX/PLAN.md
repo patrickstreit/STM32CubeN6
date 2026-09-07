@@ -850,6 +850,40 @@ Phase 1 — das Buffer-Layout, der Encoder und der SD-Pfad aus Phase 2/3 bleiben
 Zeile für Zeile dieselben. Sensor-Sync ist zugleich Voraussetzung für das
 spätere Ziel „Input-Rate = Encode-Rate ohne Drop".
 
+### Trade-off der Quell-Architekturen → `FPGA-Anforderungen.md`
+
+Die Frage „welche Architektur ist das Optimum" ist gegen die Messungen
+durchgerechnet; das Ergebnis steht als eigenständiges Übergabedokument in
+**[`FPGA-Anforderungen.md`](FPGA-Anforderungen.md)** (Varianten, Begründung,
+nummerierte Anforderungen C-1…C-16, Rückfragen). Kurzfassung:
+
+| | Was die Quelle sendet | Composite | Versatz Seg. 0→3 | Link-Last | N6-Firmware |
+|---|---|---|---|---|---|
+| A (Ist) | 4 VCs, 1920×1080, verschachtelt | 12,4 fps ✗ | 60 ms | 82 % | VC-Switch ×4 |
+| A′ | 4 VCs, 448×448 @ 120 fps | 30 fps | 25 ms | 19 % | VC-Switch ×4 |
+| B | 1 VC, 4 Frames à 448×448 nacheinander | 30 fps | 25 ms | 19 % | nur Adress-Flip |
+| **C** | **1 VC, ein Frame 1792×448 @ 30 fps** | **30 fps** | **0** | **4,8 %** | **nichts** |
+
+C gewinnt in jeder Spalte gleichzeitig, und die Umspezifikation auf Breitformat
+ist genau der Grund, warum es jetzt auch auf der FPGA-Seite die billigste
+Variante ist: nebeneinander genügen **Zeilenpuffer (~4,5 KB)**, übereinander
+hätte es **Vollbildpuffer (~735 KB)** gebraucht — die Segmente der Kanäle 1–3
+müssen dort ein ganzes Frame lang warten, bis sie an die Reihe kommen. Faktor
+170, allein aus der Drehung.
+
+Zwei Nebenbefunde aus derselben Analyse:
+
+- **Die zweite Pipe hilft nicht.** Pipe1 und Pipe2 mit `PIPEDIFF=1` auf
+  verschiedene VCs zu legen scheitert daran, dass Pipe2 weder Demosaic noch
+  Semi-Planar-Ausgabe hat (im HAL nachprüfbar: beide Funktionen nehmen nur
+  `DCMIPP_PIPE1`). Zwei Segmente in YUYV und zwei in NV12 ergeben keinen
+  Encoder-Frame; ein reiner YUYV-Composite passt mit 2 × 1,60 MB nicht mehr in
+  die 2,77 MB AXISRAM und bräuchte trotzdem 60 fps aus den Sensoren.
+- **Der Empfänger kann nur 2 Lanes** (`IS_DCMIPP_NUMBER_OF_LANES`). Bei
+  241 Mbit/s Nutzdaten für Variante C ist das reichlich — aber ein 4-Lane-Entwurf
+  auf der Quellseite wäre nicht anschliessbar, und das gehört in die
+  Anforderungen, bevor jemand so plant.
+
 ## Verifikation (gesamt)
 
 1. M0–M3- sowie M1-R-/M2-R-Reports/Traces (Konsole + Perfetto) hier in
